@@ -153,7 +153,6 @@ func _build_menu() -> void:
 	emo_sub.id_pressed.connect(_on_menu)
 	_menu.add_child(emo_sub)
 	_menu.add_submenu_item("選擇表情 ▸", "EmotionSubMenu")
-	_menu.add_item("下一個表情", 0)
 	_menu.add_item("重設表情", 1)
 	_menu.add_separator()
 	_menu.add_item("放大 (+)", 20)
