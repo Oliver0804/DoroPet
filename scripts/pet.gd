@@ -195,9 +195,9 @@ func _process(dt: float) -> void:
 	if _voice != null:
 		rms = _voice.call("consume_rms")
 
-	## 更新麥克風音量條
-	if _meter_bar != null:
-		_meter_bar.value = clamp(rms * 4.0, 0.0, 1.0)
+	## 錄音中 → 更新 bubble 內的 emoji 音量條
+	if _recording_ui:
+		_update_recording_bubble(rms)
 
 	## VAD：錄音中監聽音量，沉默自動送出
 	if _voice != null and _voice.call("is_recording") and _vad_enabled:
@@ -582,60 +582,40 @@ func _toggle_voice() -> void:
 	else:
 		_voice.call("start_recording")
 
-var _meter_bar: ProgressBar
-var _meter_label: Label
+## 錄音狀態(用 bubble 顯示;音量條用 emoji 拼,免高度被撐爆)
+var _recording_ui: bool = false
+const METER_BARS: String = "▁▂▃▄▅▆▇█"
+const METER_WIDTH: int = 14
 
-func _ensure_meter_ui() -> void:
-	if _meter_bar != null:
-		return
-	## 把音量條加進 bubble 容器（PanelContainer 內加一個 VBox 包 label + bar）
-	var vbox: VBoxContainer = VBoxContainer.new()
-	vbox.add_theme_constant_override("separation", 4)
-	_meter_label = Label.new()
-	_meter_label.text = "🎙 錄音中…（再按 Space 結束）"
-	_meter_label.add_theme_color_override("font_color", Color.BLACK)
-	_meter_label.add_theme_font_size_override("font_size", 14)
-	_meter_label.custom_minimum_size = Vector2(280, 0)
-	_meter_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_meter_bar = ProgressBar.new()
-	_meter_bar.show_percentage = false
-	_meter_bar.min_value = 0.0
-	_meter_bar.max_value = 1.0
-	_meter_bar.custom_minimum_size = Vector2(280, 14)
-	vbox.add_child(_meter_label)
-	vbox.add_child(_meter_bar)
-	## 換掉 _bubble 內既有的 Label，改放 vbox
-	for c in _bubble.get_children():
-		_bubble.remove_child(c)
-		c.queue_free()
-	_bubble.add_child(vbox)
+func _meter_string(rms: float) -> String:
+	var amp: float = clamp(rms * 4.0, 0.0, 1.0)
+	var lit: int = int(round(amp * float(METER_WIDTH)))
+	var out: String = ""
+	for i in METER_WIDTH:
+		if i < lit:
+			var lvl: int = int(amp * 7.0)
+			out += METER_BARS.substr(lvl, 1)
+		else:
+			out += "▁"
+	return out
 
-func _restore_bubble_label() -> void:
-	if _meter_bar == null:
+func _update_recording_bubble(rms: float) -> void:
+	if not _recording_ui:
 		return
-	## 還原成純文字 Label（chat 回覆會用）
-	for c in _bubble.get_children():
-		_bubble.remove_child(c)
-		c.queue_free()
-	_bubble_label = Label.new()
-	_bubble_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
-	_bubble_label.add_theme_color_override("font_color", Color.BLACK)
-	_bubble_label.add_theme_font_size_override("font_size", 16)
-	_bubble_label.custom_minimum_size = Vector2(320, 0)
-	_bubble.add_child(_bubble_label)
-	_meter_bar = null
-	_meter_label = null
+	var hk: String = hotkey_to_string(_hotkey_keycode, _hotkey_mods)
+	_bubble_label.text = "🎙 %s\n(再按 %s 結束 / Esc 取消)" % [_meter_string(rms), hk]
 
 func _on_recording_started() -> void:
-	_ensure_meter_ui()
-	_bubble_window.show()
+	_recording_ui = true
 	_bubble_timer.stop()
+	_update_recording_bubble(0.0)
+	_bubble_window.show()
 	_reposition_bubble()
 
 func _on_recording_stopped() -> void:
+	_recording_ui = false
 	_bubble_window.hide()
 	_bubble_timer.stop()
-	_restore_bubble_label()
 
 func _on_voice_transcribed(text: String) -> void:
 	_end_thinking()
