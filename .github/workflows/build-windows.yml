@@ -95,20 +95,21 @@ jobs:
           include-templates: true
 
       - name: Import project (headless)
-        shell: cmd
+        shell: pwsh
         run: |
-          godot --headless --path . --import --quit
-          godot --headless --path . --import --quit
-          if not exist .godot ( echo Import failed: .godot not generated && exit /b 1 )
+          Write-Host "Using GODOT=$env:GODOT"
+          & $env:GODOT --headless --path . --import --quit
+          & $env:GODOT --headless --path . --import --quit
+          if (-not (Test-Path .godot)) { throw "Import failed: .godot not generated" }
 
       - name: Export Windows Desktop
-        shell: cmd
+        shell: pwsh
         run: |
-          mkdir build
-          godot --headless --path . --export-release "Windows Desktop" build\DoroPet.exe
-          if not exist build\DoroPet.exe ( echo Export failed && exit /b 1 )
-          xcopy /E /I /Y addons\gd_cubism\bin build
-          dir build
+          New-Item -ItemType Directory -Force -Path build | Out-Null
+          & $env:GODOT --headless --path . --export-release "Windows Desktop" "build\DoroPet.exe"
+          if (-not (Test-Path "build\DoroPet.exe")) { throw "Export failed: build\DoroPet.exe missing" }
+          Copy-Item -Recurse -Force addons\gd_cubism\bin\* build\
+          Get-ChildItem build\
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
