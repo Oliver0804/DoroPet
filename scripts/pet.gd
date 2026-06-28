@@ -39,6 +39,12 @@ var _always_on_top: bool = true
 ## 對話熱鍵（預設 Space,可在設定面板改）
 var _hotkey_keycode: int = KEY_SPACE
 var _hotkey_mods: int = 0                  ## bitmask: cmd=1, ctrl=2, alt=4, shift=8
+## VAD（語音活動偵測）
+var _vad_enabled: bool = true
+var _vad_threshold: float = 0.02           ## RMS 門檻：> 視為有聲
+var _vad_silence_sec: float = 1.2          ## 持續沉默幾秒 → 自動送出
+var _vad_has_spoken: bool = false          ## 本次錄音內是否說過話
+var _vad_silence_t: float = 0.0
 
 const ChatClient := preload("res://scripts/chat_client.gd")
 const SettingsDialog := preload("res://scripts/settings_dialog.gd")
@@ -184,11 +190,30 @@ func _reset_expression() -> void:
 	_expression_index = 0
 
 func _process(dt: float) -> void:
+	## 每 frame 只拉一次 RMS,meter / VAD 共用
+	var rms: float = 0.0
+	if _voice != null:
+		rms = _voice.call("consume_rms")
+
 	## 更新麥克風音量條
-	if _meter_bar != null and _voice != null:
-		var rms: float = _voice.call("consume_rms")
-		## 聲音通常很小（0~0.3）→ 放大到視覺上明顯
+	if _meter_bar != null:
 		_meter_bar.value = clamp(rms * 4.0, 0.0, 1.0)
+
+	## VAD：錄音中監聽音量，沉默自動送出
+	if _voice != null and _voice.call("is_recording") and _vad_enabled:
+		if rms > _vad_threshold:
+			_vad_has_spoken = true
+			_vad_silence_t = 0.0
+		elif _vad_has_spoken:
+			_vad_silence_t += dt
+			if _vad_silence_t >= _vad_silence_sec:
+				## 自動結束送出
+				_vad_has_spoken = false
+				_vad_silence_t = 0.0
+				_last_input_voice = true
+				_begin_thinking()
+				_voice.call("stop_and_send")
+
 	if model == null:
 		return
 
@@ -399,6 +424,8 @@ func _open_input() -> void:
 	_reposition_input()
 	_input_box.grab_focus()
 	## 立即啟動錄音聆聽（若 STT 可用）
+	_vad_has_spoken = false
+	_vad_silence_t = 0.0
 	if _voice != null and _voice.call("has_stt"):
 		_voice.call("start_recording")
 
@@ -681,6 +708,9 @@ func _open_settings() -> void:
 		"tts_enabled": _voice.call("is_tts_enabled") if _voice else true,
 		"hotkey_keycode": _hotkey_keycode,
 		"hotkey_mods": _hotkey_mods,
+		"vad_enabled": _vad_enabled,
+		"vad_threshold": _vad_threshold,
+		"vad_silence_sec": _vad_silence_sec,
 	}
 	_settings.open(data, _chat.call("get_status"), _voice.call("stt_status") if _voice else "")
 
@@ -700,6 +730,9 @@ func _on_settings_changed(data: Dictionary) -> void:
 	_gaze_follow = bool(data.get("gaze_follow", _gaze_follow))
 	_hotkey_keycode = int(data.get("hotkey_keycode", _hotkey_keycode))
 	_hotkey_mods = int(data.get("hotkey_mods", _hotkey_mods))
+	_vad_enabled = bool(data.get("vad_enabled", _vad_enabled))
+	_vad_threshold = float(data.get("vad_threshold", _vad_threshold))
+	_vad_silence_sec = float(data.get("vad_silence_sec", _vad_silence_sec))
 	_apply_scale()
 	get_window().always_on_top = _always_on_top
 	if _chat:
@@ -737,6 +770,9 @@ func _load_config() -> void:
 	_gaze_follow = cfg.get_value("pet", "gaze_follow", _gaze_follow)
 	_hotkey_keycode = int(cfg.get_value("pet", "hotkey_keycode", _hotkey_keycode))
 	_hotkey_mods = int(cfg.get_value("pet", "hotkey_mods", _hotkey_mods))
+	_vad_enabled = bool(cfg.get_value("pet", "vad_enabled", _vad_enabled))
+	_vad_threshold = float(cfg.get_value("pet", "vad_threshold", _vad_threshold))
+	_vad_silence_sec = float(cfg.get_value("pet", "vad_silence_sec", _vad_silence_sec))
 
 func _save_config() -> void:
 	var cfg: ConfigFile = ConfigFile.new()
@@ -751,6 +787,9 @@ func _save_config() -> void:
 	cfg.set_value("pet", "gaze_follow", _gaze_follow)
 	cfg.set_value("pet", "hotkey_keycode", _hotkey_keycode)
 	cfg.set_value("pet", "hotkey_mods", _hotkey_mods)
+	cfg.set_value("pet", "vad_enabled", _vad_enabled)
+	cfg.set_value("pet", "vad_threshold", _vad_threshold)
+	cfg.set_value("pet", "vad_silence_sec", _vad_silence_sec)
 	if _chat:
 		cfg.set_value("chat", "api_key", _chat.call("get_api_key"))
 		cfg.set_value("chat", "model", _chat.call("get_model"))

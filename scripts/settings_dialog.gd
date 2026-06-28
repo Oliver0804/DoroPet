@@ -40,6 +40,12 @@ var _hotkey_keycode: int = KEY_SPACE
 var _hotkey_mods: int = 0
 var _capturing_hotkey: bool = false
 
+## VAD
+var _vad_check: CheckBox
+var _vad_threshold_slider: HSlider
+var _vad_threshold_label: Label
+var _vad_silence_spin: SpinBox
+
 func _init() -> void:
 	title = "Doro 設定"
 	size = Vector2i(560, 680)
@@ -82,6 +88,10 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 	_hotkey_keycode = int(initial.get("hotkey_keycode", KEY_SPACE))
 	_hotkey_mods = int(initial.get("hotkey_mods", 0))
 	_refresh_hotkey_btn()
+	_vad_check.button_pressed = bool(initial.get("vad_enabled", true))
+	_vad_threshold_slider.value = float(initial.get("vad_threshold", 0.02))
+	_vad_silence_spin.value = float(initial.get("vad_silence_sec", 1.2))
+	_update_vad_threshold_label(_vad_threshold_slider.value)
 	_update_scale_label(_scale_slider.value)
 	popup_centered()
 
@@ -178,6 +188,44 @@ func _build_ui() -> void:
 	hk_row.add_child(_hotkey_btn)
 	hk_row.add_child(hk_hint)
 	vb.add_child(hk_row)
+
+	## VAD 自動分段送出
+	_vad_check = CheckBox.new()
+	_vad_check.text = "VAD：講完話沉默自動送出"
+	_vad_check.toggled.connect(_on_any_toggled)
+	vb.add_child(_vad_check)
+
+	var vad_th_row: HBoxContainer = HBoxContainer.new()
+	var vad_th_cap: Label = Label.new()
+	vad_th_cap.text = "音量門檻"
+	vad_th_cap.custom_minimum_size = Vector2(80, 0)
+	_vad_threshold_slider = HSlider.new()
+	_vad_threshold_slider.min_value = 0.005
+	_vad_threshold_slider.max_value = 0.15
+	_vad_threshold_slider.step = 0.005
+	_vad_threshold_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_vad_threshold_slider.value_changed.connect(_on_any_changed)
+	_vad_threshold_slider.value_changed.connect(_update_vad_threshold_label)
+	_vad_threshold_label = Label.new()
+	_vad_threshold_label.custom_minimum_size = Vector2(60, 0)
+	vad_th_row.add_child(vad_th_cap)
+	vad_th_row.add_child(_vad_threshold_slider)
+	vad_th_row.add_child(_vad_threshold_label)
+	vb.add_child(vad_th_row)
+
+	var vad_sil_row: HBoxContainer = HBoxContainer.new()
+	var vad_sil_cap: Label = Label.new()
+	vad_sil_cap.text = "沉默送出"
+	vad_sil_cap.custom_minimum_size = Vector2(80, 0)
+	_vad_silence_spin = SpinBox.new()
+	_vad_silence_spin.min_value = 0.3
+	_vad_silence_spin.max_value = 5.0
+	_vad_silence_spin.step = 0.1
+	_vad_silence_spin.suffix = " 秒"
+	_vad_silence_spin.value_changed.connect(_on_any_changed)
+	vad_sil_row.add_child(vad_sil_cap)
+	vad_sil_row.add_child(_vad_silence_spin)
+	vb.add_child(vad_sil_row)
 
 	vb.add_child(_separator())
 	vb.add_child(_section("對話（OpenRouter）"))
@@ -407,6 +455,9 @@ func _slider_row(parent: Container, caption: String, lo: float, hi: float, step:
 func _update_scale_label(v: float) -> void:
 	_scale_label.text = "%.2f" % v
 
+func _update_vad_threshold_label(v: float) -> void:
+	_vad_threshold_label.text = "%.3f" % v
+
 func _on_any_changed(_v: float) -> void:
 	_emit()
 
@@ -446,6 +497,9 @@ func _collect() -> Dictionary:
 		"tts_enabled": _tts_enabled.button_pressed,
 		"hotkey_keycode": _hotkey_keycode,
 		"hotkey_mods": _hotkey_mods,
+		"vad_enabled": _vad_check.button_pressed,
+		"vad_threshold": _vad_threshold_slider.value,
+		"vad_silence_sec": _vad_silence_spin.value,
 	}
 
 func _reset_defaults() -> void:
