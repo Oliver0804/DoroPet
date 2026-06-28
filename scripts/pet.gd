@@ -50,6 +50,14 @@ var _vad_threshold: float = 0.02           ## RMS 門檻：> 視為有聲
 var _vad_silence_sec: float = 1.2          ## 持續沉默幾秒 → 自動送出
 var _vad_has_spoken: bool = false          ## 本次錄音內是否說過話
 var _vad_silence_t: float = 0.0
+## 隨機自動表情
+const AUTO_EMO_MIN_SEC: float = 60.0       ## 1 分鐘
+const AUTO_EMO_MAX_SEC: float = 300.0      ## 5 分鐘
+const AUTO_EMO_HOLD_SEC: float = 10.0      ## 表情停留時長
+const AUTO_EMO_CHOICES: Array = [1, 2, 3, 4, 5, 6, 8, 9, 10]  ## 略過 7(讀取中)
+var _auto_emo_timer: Timer
+var _auto_emo_reset_timer: Timer
+var _setting_auto_emo: bool = false        ## 標記目前 _set_emotion 是否為 auto 觸發
 
 const ChatClient := preload("res://scripts/chat_client.gd")
 const SettingsDialog := preload("res://scripts/settings_dialog.gd")
@@ -85,6 +93,42 @@ func _ready() -> void:
 	_build_menu()
 	_build_chat_ui()
 	get_window().always_on_top = _always_on_top
+	_setup_auto_emotion()
+
+func _setup_auto_emotion() -> void:
+	_auto_emo_timer = Timer.new()
+	_auto_emo_timer.one_shot = true
+	_auto_emo_timer.timeout.connect(_auto_emo_fire)
+	add_child(_auto_emo_timer)
+
+	_auto_emo_reset_timer = Timer.new()
+	_auto_emo_reset_timer.one_shot = true
+	_auto_emo_reset_timer.timeout.connect(_auto_emo_reset)
+	add_child(_auto_emo_reset_timer)
+
+	_schedule_next_auto_emo()
+
+func _schedule_next_auto_emo() -> void:
+	var sec: float = randf_range(AUTO_EMO_MIN_SEC, AUTO_EMO_MAX_SEC)
+	_auto_emo_timer.start(sec)
+
+func _auto_emo_fire() -> void:
+	## 處理中時不打斷,延後再試
+	if _thinking:
+		_schedule_next_auto_emo()
+		return
+	var emo: int = AUTO_EMO_CHOICES[randi() % AUTO_EMO_CHOICES.size()]
+	_setting_auto_emo = true
+	_set_emotion(emo)
+	_setting_auto_emo = false
+	_auto_emo_reset_timer.start(AUTO_EMO_HOLD_SEC)
+
+func _auto_emo_reset() -> void:
+	if not _thinking:
+		_setting_auto_emo = true
+		_set_emotion(0)
+		_setting_auto_emo = false
+	_schedule_next_auto_emo()
 
 func _load_model() -> void:
 	## 用 ClassDB.instantiate 避免編輯器解析期找不到 GDExtension 類別
@@ -543,6 +587,9 @@ func _on_chat_reply(text: String, emotion: int) -> void:
 func _set_emotion(emo: int) -> void:
 	if model == null:
 		return
+	## user 介入(不是 auto 觸發)→ 取消自動 reset,讓 user 選的表情留住直到下次互動
+	if not _setting_auto_emo and _auto_emo_reset_timer != null:
+		_auto_emo_reset_timer.stop()
 	if emo <= 0 or not EMOTION_MAP.has(emo):
 		model.call("stop_expression")
 		return
