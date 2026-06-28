@@ -113,20 +113,22 @@ jobs:
       - name: Import project (headless)
         shell: pwsh
         run: |
-          $godot = "$env:GODOT.exe"
+          $godot = $env:GODOT + ".exe"
+          Write-Host "godot=$godot exists=$(Test-Path $godot)"
+          if (-not (Test-Path $godot)) { throw "godot.exe not found at $godot" }
           Write-Host "=== first import ==="
-          & $godot --headless --path . --import --verbose
+          & $godot --headless --path . --import
           Write-Host "=== first exit=$LASTEXITCODE ==="
           Write-Host "=== second import ==="
           & $godot --headless --path . --import
           Write-Host "=== second exit=$LASTEXITCODE ==="
-          Get-ChildItem .godot -ErrorAction SilentlyContinue | Format-Table -AutoSize
           if (-not (Test-Path .godot)) { throw "Import failed: .godot not generated" }
+          Get-ChildItem .godot | Format-Table -AutoSize
 
       - name: Export Windows Desktop
         shell: pwsh
         run: |
-          $godot = "$env:GODOT.exe"
+          $godot = $env:GODOT + ".exe"
           New-Item -ItemType Directory -Force -Path build | Out-Null
           & $godot --headless --path . --export-release --verbose "Windows Desktop" "build\DoroPet.exe"
           Write-Host "=== export exit=$LASTEXITCODE ==="
