@@ -47,6 +47,19 @@ jobs:
           git clone --depth 1 --branch $env:GD_CUBISM_TAG --recurse-submodules `
             https://github.com/MizunagiKB/gd_cubism.git vendor/gd_cubism
 
+      - name: Cache gd_cubism build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor/gd_cubism/godot-cpp/bin
+            vendor/gd_cubism/godot-cpp/gen
+            vendor/gd_cubism/src/*.os
+            vendor/gd_cubism/src/private/*.os
+            vendor/gd_cubism/thirdparty/CubismSdkForNative-*/Framework/src/**/*.os
+            vendor/gd_cubism/demo/addons/gd_cubism/bin
+            vendor/gd_cubism/.sconsign.dblite
+          key: ${{ runner.os }}-gd_cubism-${{ env.GD_CUBISM_TAG }}-v3
+
       - name: Download Cubism SDK 5-r.1
         shell: pwsh
         run: |
