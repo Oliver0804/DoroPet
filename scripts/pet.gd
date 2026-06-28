@@ -36,6 +36,9 @@ var _menu: PopupMenu
 var _gaze_follow: bool = true
 var _bubble_seconds: float = 8.0
 var _always_on_top: bool = true
+## 對話熱鍵（預設 Space,可在設定面板改）
+var _hotkey_keycode: int = KEY_SPACE
+var _hotkey_mods: int = 0                  ## bitmask: cmd=1, ctrl=2, alt=4, shift=8
 
 const ChatClient := preload("res://scripts/chat_client.gd")
 const SettingsDialog := preload("res://scripts/settings_dialog.gd")
@@ -128,8 +131,7 @@ func _collect_expressions() -> void:
 
 func _build_menu() -> void:
 	_menu = PopupMenu.new()
-	_menu.add_item("語音對話 (Space)", 50)
-	_menu.add_item("跟 Doro 說話 (Enter)", 30)
+	_menu.add_item("跟 Doro 對話", 30)
 	_menu.add_item("清空對話", 31)
 	_menu.add_separator()
 	_menu.add_item("下一個表情", 0)
@@ -163,8 +165,6 @@ func _on_menu(id: int) -> void:
 			if _chat:
 				_chat.call("reset_history")
 				_show_bubble("(對話清空了 ~)", 2.5)
-		50:
-			_toggle_voice()
 		40:
 			_open_settings()
 		99:
@@ -253,18 +253,24 @@ func _set_param(id: String, value: float) -> void:
 			return
 
 func _input(event: InputEvent) -> void:
-	## Enter 開啟輸入框（輸入框沒在前景時）
 	if event is InputEventKey and event.pressed and not event.echo:
-		if event.keycode == KEY_ENTER and not (_input_box and _input_box.visible):
-			_open_input()
+		var input_open: bool = _input_box != null and _input_window.visible
+		## 熱鍵：未開時 → 開輸入框 + 立刻錄音；已開時 → 結束錄音送 STT
+		if _matches_hotkey(event):
+			if input_open:
+				if _voice != null and _voice.call("is_recording"):
+					_last_input_voice = true
+					_begin_thinking()
+					_voice.call("stop_and_send")
+			else:
+				_open_input()
 			get_viewport().set_input_as_handled()
 			return
-		elif event.keycode == KEY_ESCAPE and _input_box and _input_box.visible:
+		## ESC：取消
+		if event.keycode == KEY_ESCAPE and input_open:
+			if _voice != null and _voice.call("is_recording"):
+				_voice.call("abort_recording")
 			_close_input()
-			get_viewport().set_input_as_handled()
-			return
-		elif event.keycode == KEY_SPACE and not (_input_box and _input_box.visible):
-			_toggle_voice()
 			get_viewport().set_input_as_handled()
 			return
 	if event is InputEventMouseButton:
@@ -378,6 +384,7 @@ func _build_chat_ui() -> void:
 	_input_box.anchor_bottom = 1.0
 	_input_box.add_theme_font_size_override("font_size", 14)
 	_input_box.text_submitted.connect(_on_submit)
+	_input_box.text_changed.connect(_on_input_text_changed)
 	_input_window.add_child(_input_box)
 	add_child(_input_window)
 
@@ -386,13 +393,20 @@ func _open_input() -> void:
 		_show_bubble("(沒設 OPENROUTER_API_KEY 啦~)", 3.0)
 		return
 	_input_box.text = ""
+	var hotkey_str: String = hotkey_to_string(_hotkey_keycode, _hotkey_mods)
+	_input_box.placeholder_text = "🎙 聽你說... 再按 %s 結束 / Esc 取消 / 直接打字也行" % hotkey_str
 	_input_window.show()
 	_reposition_input()
 	_input_box.grab_focus()
+	## 立即啟動錄音聆聽（若 STT 可用）
+	if _voice != null and _voice.call("has_stt"):
+		_voice.call("start_recording")
 
 func _close_input() -> void:
 	_input_box.release_focus()
 	_input_window.hide()
+	if _voice != null and _voice.call("is_recording"):
+		_voice.call("abort_recording")
 
 func _make_floating_window(default_size: Vector2i) -> Window:
 	var w: Window = Window.new()
@@ -452,6 +466,11 @@ func _grab_screenshot_b64() -> String:
 	f.close()
 	return Marshalls.raw_to_base64(bytes)
 
+func _on_input_text_changed(_t: String) -> void:
+	## 使用者開始打字 → 中止錄音（避免 STT 結果覆蓋 user 輸入）
+	if _voice != null and _voice.call("is_recording"):
+		_voice.call("abort_recording")
+
 func _on_submit(text: String) -> void:
 	var t: String = text.strip_edges()
 	if t == "":
@@ -493,6 +512,29 @@ func _begin_thinking() -> void:
 
 func _end_thinking() -> void:
 	_thinking = false
+
+## ---------- 熱鍵 ----------
+func _event_modifiers(ev: InputEventKey) -> int:
+	var m: int = 0
+	if ev.meta_pressed: m |= 1
+	if ev.ctrl_pressed: m |= 2
+	if ev.alt_pressed:  m |= 4
+	if ev.shift_pressed: m |= 8
+	return m
+
+func _matches_hotkey(ev: InputEventKey) -> bool:
+	if ev.keycode != _hotkey_keycode:
+		return false
+	return _event_modifiers(ev) == _hotkey_mods
+
+static func hotkey_to_string(keycode: int, mods: int) -> String:
+	var parts: PackedStringArray = []
+	if mods & 2: parts.append("⌃")    ## ctrl
+	if mods & 4: parts.append("⌥")    ## alt/option
+	if mods & 8: parts.append("⇧")    ## shift
+	if mods & 1: parts.append("⌘")    ## cmd/meta
+	parts.append(OS.get_keycode_string(keycode))
+	return "+".join(parts)
 
 func _on_chat_error(reason: String) -> void:
 	_end_thinking()
@@ -569,11 +611,18 @@ func _on_recording_stopped() -> void:
 	_restore_bubble_label()
 
 func _on_voice_transcribed(text: String) -> void:
-	_show_bubble("「%s」" % text, 3.0)
-	## 經過短暫顯示後送入 chat
-	await get_tree().create_timer(0.3).timeout
-	_show_bubble("…(Doro 想想)", 999.0)
-	_chat.call("send", text)
+	_end_thinking()
+	## STT 完成 → 填到輸入框，user 可編輯後 Enter 送出
+	if _input_box != null and _input_window.visible:
+		_input_box.text = text
+		_input_box.caret_column = text.length()
+		_input_box.grab_focus()
+	else:
+		## 輸入框已被關掉就直接送
+		_last_input_voice = true
+		_begin_thinking()
+		_show_bubble("「%s」" % text, 2.0)
+		_chat.call("send", text)
 
 func _on_voice_error(reason: String) -> void:
 	_end_thinking()
@@ -630,6 +679,8 @@ func _open_settings() -> void:
 		"voice_local_model": _voice.call("get_local_model") if _voice else "",
 		"tts_voice": _voice.call("get_voice") if _voice else "Mei-Jia",
 		"tts_enabled": _voice.call("is_tts_enabled") if _voice else true,
+		"hotkey_keycode": _hotkey_keycode,
+		"hotkey_mods": _hotkey_mods,
 	}
 	_settings.open(data, _chat.call("get_status"), _voice.call("stt_status") if _voice else "")
 
@@ -647,6 +698,8 @@ func _on_settings_changed(data: Dictionary) -> void:
 	_bubble_seconds = float(data.get("bubble_seconds", _bubble_seconds))
 	_always_on_top = bool(data.get("always_on_top", _always_on_top))
 	_gaze_follow = bool(data.get("gaze_follow", _gaze_follow))
+	_hotkey_keycode = int(data.get("hotkey_keycode", _hotkey_keycode))
+	_hotkey_mods = int(data.get("hotkey_mods", _hotkey_mods))
 	_apply_scale()
 	get_window().always_on_top = _always_on_top
 	if _chat:
@@ -682,6 +735,8 @@ func _load_config() -> void:
 	_bubble_seconds = cfg.get_value("pet", "bubble_seconds", _bubble_seconds)
 	_always_on_top = cfg.get_value("pet", "always_on_top", _always_on_top)
 	_gaze_follow = cfg.get_value("pet", "gaze_follow", _gaze_follow)
+	_hotkey_keycode = int(cfg.get_value("pet", "hotkey_keycode", _hotkey_keycode))
+	_hotkey_mods = int(cfg.get_value("pet", "hotkey_mods", _hotkey_mods))
 
 func _save_config() -> void:
 	var cfg: ConfigFile = ConfigFile.new()
@@ -694,6 +749,8 @@ func _save_config() -> void:
 	cfg.set_value("pet", "bubble_seconds", _bubble_seconds)
 	cfg.set_value("pet", "always_on_top", _always_on_top)
 	cfg.set_value("pet", "gaze_follow", _gaze_follow)
+	cfg.set_value("pet", "hotkey_keycode", _hotkey_keycode)
+	cfg.set_value("pet", "hotkey_mods", _hotkey_mods)
 	if _chat:
 		cfg.set_value("chat", "api_key", _chat.call("get_api_key"))
 		cfg.set_value("chat", "model", _chat.call("get_model"))

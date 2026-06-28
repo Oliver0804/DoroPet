@@ -189,6 +189,14 @@ func start_recording() -> bool:
 	recording_started.emit()
 	return true
 
+func abort_recording() -> void:
+	if not _recording:
+		return
+	_recording = false
+	_player.stop()
+	_eff.clear_buffer()
+	recording_stopped.emit()
+
 func stop_and_send() -> void:
 	if not _recording:
 		return

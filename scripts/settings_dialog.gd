@@ -34,6 +34,12 @@ var _mic_device: OptionButton
 var _mic_test_btn: Button
 var _mic_test_bar: ProgressBar
 
+## 熱鍵
+var _hotkey_btn: Button
+var _hotkey_keycode: int = KEY_SPACE
+var _hotkey_mods: int = 0
+var _capturing_hotkey: bool = false
+
 func _init() -> void:
 	title = "Doro 設定"
 	size = Vector2i(560, 680)
@@ -73,6 +79,9 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 			_tts_voice.select(i)
 			break
 	_voice_status.text = "Whisper: " + voice_status
+	_hotkey_keycode = int(initial.get("hotkey_keycode", KEY_SPACE))
+	_hotkey_mods = int(initial.get("hotkey_mods", 0))
+	_refresh_hotkey_btn()
 	_update_scale_label(_scale_slider.value)
 	popup_centered()
 
@@ -151,6 +160,24 @@ func _build_ui() -> void:
 	bubble_row.add_child(bubble_cap)
 	bubble_row.add_child(_bubble_spin)
 	vb.add_child(bubble_row)
+
+	## 對話熱鍵
+	var hk_row: HBoxContainer = HBoxContainer.new()
+	var hk_cap: Label = Label.new()
+	hk_cap.text = "對話熱鍵"
+	hk_cap.custom_minimum_size = Vector2(80, 0)
+	_hotkey_btn = Button.new()
+	_hotkey_btn.toggle_mode = true
+	_hotkey_btn.toggled.connect(_on_hotkey_btn_toggled)
+	_hotkey_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var hk_hint: Label = Label.new()
+	hk_hint.text = "(點按鈕後按任一鍵組合)"
+	hk_hint.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
+	hk_hint.add_theme_font_size_override("font_size", 12)
+	hk_row.add_child(hk_cap)
+	hk_row.add_child(_hotkey_btn)
+	hk_row.add_child(hk_hint)
+	vb.add_child(hk_row)
 
 	vb.add_child(_separator())
 	vb.add_child(_section("對話（OpenRouter）"))
@@ -417,6 +444,8 @@ func _collect() -> Dictionary:
 		"voice_local_model": _voice_local_model.text,
 		"tts_voice": tts_v,
 		"tts_enabled": _tts_enabled.button_pressed,
+		"hotkey_keycode": _hotkey_keycode,
+		"hotkey_mods": _hotkey_mods,
 	}
 
 func _reset_defaults() -> void:
@@ -435,6 +464,55 @@ func _on_close() -> void:
 		_mic_test_btn.button_pressed = false
 	_emit()
 	hide()
+
+## ---------- 對話熱鍵 capture ----------
+func _refresh_hotkey_btn() -> void:
+	if _hotkey_btn == null:
+		return
+	_hotkey_btn.text = _hotkey_string(_hotkey_keycode, _hotkey_mods)
+
+func _hotkey_string(keycode: int, mods: int) -> String:
+	var parts: PackedStringArray = []
+	if mods & 2: parts.append("⌃")
+	if mods & 4: parts.append("⌥")
+	if mods & 8: parts.append("⇧")
+	if mods & 1: parts.append("⌘")
+	parts.append(OS.get_keycode_string(keycode))
+	return "+".join(parts)
+
+func _on_hotkey_btn_toggled(on: bool) -> void:
+	_capturing_hotkey = on
+	if on:
+		_hotkey_btn.text = "按下任一組合鍵…（Esc 取消）"
+		grab_focus()
+	else:
+		_refresh_hotkey_btn()
+
+func _input(event: InputEvent) -> void:
+	if not _capturing_hotkey:
+		return
+	if event is InputEventKey and event.pressed and not event.echo:
+		var k: int = event.keycode
+		## 純 modifier 鍵不能單獨當熱鍵
+		if k in [KEY_META, KEY_CTRL, KEY_ALT, KEY_SHIFT]:
+			return
+		if k == KEY_ESCAPE:
+			_capturing_hotkey = false
+			_hotkey_btn.button_pressed = false
+			_refresh_hotkey_btn()
+			set_input_as_handled()
+			return
+		_hotkey_keycode = k
+		_hotkey_mods = 0
+		if event.meta_pressed:  _hotkey_mods |= 1
+		if event.ctrl_pressed:  _hotkey_mods |= 2
+		if event.alt_pressed:   _hotkey_mods |= 4
+		if event.shift_pressed: _hotkey_mods |= 8
+		_capturing_hotkey = false
+		_hotkey_btn.button_pressed = false
+		_refresh_hotkey_btn()
+		_emit()
+		set_input_as_handled()
 
 ## ---------- 麥克風裝置 / 測試 ----------
 func set_voice_node(n: Node) -> void:
