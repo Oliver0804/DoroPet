@@ -612,12 +612,6 @@ func _open_settings() -> void:
 		_settings.logs_requested.connect(_open_logs)
 	## 把 voice node 注入,讓 dialog 自己列裝置 / 跑測試 / 顯示 RMS
 	_settings.call("set_voice_node", _voice)
-
-func _open_logs() -> void:
-	if _logs_viewer == null:
-		_logs_viewer = LogsViewer.new()
-		add_child(_logs_viewer)
-	_logs_viewer.call("open")
 	var data: Dictionary = {
 		"scale": model_scale,
 		"head": head_follow_strength,
@@ -638,6 +632,12 @@ func _open_logs() -> void:
 		"tts_enabled": _voice.call("is_tts_enabled") if _voice else true,
 	}
 	_settings.open(data, _chat.call("get_status"), _voice.call("stt_status") if _voice else "")
+
+func _open_logs() -> void:
+	if _logs_viewer == null:
+		_logs_viewer = LogsViewer.new()
+		add_child(_logs_viewer)
+	_logs_viewer.call("open")
 
 func _on_settings_changed(data: Dictionary) -> void:
 	## 即時套用 + 寫 config

@@ -176,7 +176,11 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 	## 去掉可能的 ``` 或 ```json fence
 	if clean.begins_with("```"):
 		clean = clean.trim_prefix("```json").trim_prefix("```").trim_suffix("```").strip_edges()
-	var obj: Variant = JSON.parse_string(clean)
+	## 用 JSON instance silent parse（避免 LLM 回非 JSON 時印 ERROR）
+	var parser: JSON = JSON.new()
+	var obj: Variant = null
+	if parser.parse(clean) == OK:
+		obj = parser.data
 	if typeof(obj) == TYPE_DICTIONARY and (obj as Dictionary).has("text"):
 		var emo: int = int((obj as Dictionary).get("emotion", 0))
 		var txt: String = String((obj as Dictionary)["text"]).strip_edges()
