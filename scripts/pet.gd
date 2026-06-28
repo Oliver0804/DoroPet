@@ -40,6 +40,8 @@ var _always_on_top: bool = true
 const ChatClient := preload("res://scripts/chat_client.gd")
 const SettingsDialog := preload("res://scripts/settings_dialog.gd")
 const VoiceClient := preload("res://scripts/voice_client.gd")
+const LogsViewer := preload("res://scripts/logs_viewer.gd")
+var _logs_viewer: Window
 var _chat: Node                            ## ChatClient 實例
 var _voice: Node                           ## VoiceClient 實例
 var _bubble_window: Window                 ## 浮在 Doro 頭頂的對話氣泡（獨立視窗）
@@ -607,8 +609,15 @@ func _open_settings() -> void:
 		_settings = SettingsDialog.new()
 		add_child(_settings)
 		_settings.settings_changed.connect(_on_settings_changed)
+		_settings.logs_requested.connect(_open_logs)
 	## 把 voice node 注入,讓 dialog 自己列裝置 / 跑測試 / 顯示 RMS
 	_settings.call("set_voice_node", _voice)
+
+func _open_logs() -> void:
+	if _logs_viewer == null:
+		_logs_viewer = LogsViewer.new()
+		add_child(_logs_viewer)
+	_logs_viewer.call("open")
 	var data: Dictionary = {
 		"scale": model_scale,
 		"head": head_follow_strength,

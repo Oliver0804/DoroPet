@@ -30,12 +30,14 @@ emotion 對應表（依當下心情選一個最貼切的）：
 const MAX_HISTORY: int = 8                 ## 對話 context 上限（user+assistant 訊息對）
 const TIMEOUT_SEC: float = 30.0
 
+const DoroLogger := preload("res://scripts/logger.gd")
 var _http: HTTPRequest
 var _history: Array = []                   ## [{role,content}, ...]
 var _api_key: String = ""
 var _model: String = DEFAULT_MODEL
 var _persona: String = DEFAULT_PERSONA
 var _in_flight: bool = false
+var _request_started_ms: int = 0
 
 ## ---------- runtime 設定 ----------
 func set_api_key(k: String) -> void:
@@ -126,21 +128,32 @@ func send(user_text: String, image_b64: String = "") -> void:
 		"X-Title: DoroPet",
 	]
 	_in_flight = true
+	_request_started_ms = Time.get_ticks_msec()
+	DoroLogger.log("chat_request", {
+		"text": user_text,
+		"model": _model,
+		"has_image": image_b64 != "",
+		"history_size": _history.size(),
+	})
 	var err: int = _http.request(ENDPOINT, headers, HTTPClient.METHOD_POST, JSON.stringify(body))
 	if err != OK:
 		_in_flight = false
 		_history.pop_back()
+		DoroLogger.log("chat_error", {"reason": "HTTPRequest start fail %d" % err})
 		error_occurred.emit("HTTPRequest 啟動失敗: %d" % err)
 
 func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByteArray) -> void:
 	_in_flight = false
+	var latency_ms: int = Time.get_ticks_msec() - _request_started_ms
 	if result != HTTPRequest.RESULT_SUCCESS:
 		_history.pop_back()
+		DoroLogger.log("chat_error", {"reason": "network result=%d" % result, "latency_ms": latency_ms})
 		error_occurred.emit("網路錯誤 (result=%d)" % result)
 		return
 	var text: String = body.get_string_from_utf8()
 	if code < 200 or code >= 300:
 		_history.pop_back()
+		DoroLogger.log("chat_error", {"reason": "HTTP %d" % code, "body": text.substr(0, 500), "latency_ms": latency_ms})
 		error_occurred.emit("HTTP %d: %s" % [code, text.substr(0, 200)])
 		return
 	var parsed: Variant = JSON.parse_string(text)
@@ -167,6 +180,8 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 	if typeof(obj) == TYPE_DICTIONARY and (obj as Dictionary).has("text"):
 		var emo: int = int((obj as Dictionary).get("emotion", 0))
 		var txt: String = String((obj as Dictionary)["text"]).strip_edges()
+		DoroLogger.log("chat_response", {"text": txt, "emotion": emo, "model": _model, "latency_ms": latency_ms})
 		reply_received.emit(txt, clamp(emo, 0, 10))
 	else:
+		DoroLogger.log("chat_response", {"text": clean, "raw": true, "model": _model, "latency_ms": latency_ms})
 		reply_received.emit(clean, 0)

@@ -2,6 +2,7 @@ extends Window
 ## DoroPet 設定視窗。所有欄位即時生效，按關閉自動寫 config。
 
 signal settings_changed(data: Dictionary)
+signal logs_requested
 
 ## 由 pet.gd 在 open() 時帶入當前值
 var _initial: Dictionary = {}
@@ -332,12 +333,16 @@ func _build_ui() -> void:
 
 	var bot: HBoxContainer = HBoxContainer.new()
 	bot.alignment = BoxContainer.ALIGNMENT_END
+	var logs_btn: Button = Button.new()
+	logs_btn.text = "📋 查看記錄"
+	logs_btn.pressed.connect(func() -> void: logs_requested.emit())
 	var reset_btn: Button = Button.new()
 	reset_btn.text = "還原預設值"
 	reset_btn.pressed.connect(_reset_defaults)
 	var close_btn: Button = Button.new()
 	close_btn.text = "儲存並關閉"
 	close_btn.pressed.connect(_on_close)
+	bot.add_child(logs_btn)
 	bot.add_child(reset_btn)
 	bot.add_child(close_btn)
 	outer.add_child(bot)

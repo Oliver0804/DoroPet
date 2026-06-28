@@ -40,10 +40,12 @@ var _local_model: String = ""        ## 完整路徑指向 ggml-*.bin
 var _voice: String = "Mei-Jia"   ## macOS 中文女聲；可用 "Tingting" "Sin-ji" 等
 var _tts_enabled: bool = true
 
+const DoroLogger := preload("res://scripts/logger.gd")
 var _http: HTTPRequest
 var _say_pid: int = -1
 var _testing: bool = false              ## 測試模式：只看音量不送 STT
 var _peak_rms: float = 0.0              ## 從上次拉取後的峰值 RMS
+var _stt_started_ms: int = 0
 
 func _ready() -> void:
 	_api_key = OS.get_environment("OPENAI_API_KEY")
@@ -209,6 +211,9 @@ func stop_and_send() -> void:
 		return
 	f.store_buffer(wav)
 	f.close()
+	_stt_started_ms = Time.get_ticks_msec()
+	var audio_sec: float = float(frames.size()) / float(_sample_rate)
+	DoroLogger.log("stt_request", {"engine": _engine, "audio_sec": audio_sec})
 	if _engine == "local":
 		_run_local_whisper(ProjectSettings.globalize_path(TMP_WAV))
 	else:
@@ -266,12 +271,16 @@ func _local_whisper_thread(wav_path: String, bin: String, model_path: String) ->
 	call_deferred("_emit_local_result", rc, text)
 
 func _emit_local_result(rc: int, text: String) -> void:
+	var lat: int = Time.get_ticks_msec() - _stt_started_ms
 	if rc != 0:
+		DoroLogger.log("stt_error", {"engine": "local", "reason": "rc=%d" % rc, "latency_ms": lat})
 		stt_error.emit("whisper-cli 退出碼 %d" % rc)
 		return
 	if text == "":
+		DoroLogger.log("stt_error", {"engine": "local", "reason": "empty", "latency_ms": lat})
 		stt_error.emit("沒辨識到內容")
 		return
+	DoroLogger.log("stt_response", {"engine": "local", "text": text, "latency_ms": lat})
 	transcribed.emit(text)
 
 ## PCM frames(Vector2，-1~1) → 16-bit mono WAV
@@ -329,21 +338,27 @@ func _upload_wav(wav: PackedByteArray) -> void:
 		stt_error.emit("HTTPRequest 啟動失敗: %d" % err)
 
 func _on_stt_response(result: int, code: int, _h: PackedStringArray, body: PackedByteArray) -> void:
+	var lat: int = Time.get_ticks_msec() - _stt_started_ms
 	if result != HTTPRequest.RESULT_SUCCESS:
+		DoroLogger.log("stt_error", {"engine": "api", "reason": "network %d" % result, "latency_ms": lat})
 		stt_error.emit("網路錯誤 (result=%d)" % result)
 		return
 	var txt: String = body.get_string_from_utf8()
 	if code < 200 or code >= 300:
+		DoroLogger.log("stt_error", {"engine": "api", "reason": "HTTP %d" % code, "body": txt.substr(0, 300), "latency_ms": lat})
 		stt_error.emit("STT HTTP %d: %s" % [code, txt.substr(0, 200)])
 		return
 	var parsed: Variant = JSON.parse_string(txt)
 	if typeof(parsed) != TYPE_DICTIONARY or not (parsed as Dictionary).has("text"):
+		DoroLogger.log("stt_error", {"engine": "api", "reason": "bad json", "latency_ms": lat})
 		stt_error.emit("STT 回覆格式異常")
 		return
 	var text: String = String((parsed as Dictionary)["text"]).strip_edges()
 	if text == "":
+		DoroLogger.log("stt_error", {"engine": "api", "reason": "empty", "latency_ms": lat})
 		stt_error.emit("沒辨識到內容")
 		return
+	DoroLogger.log("stt_response", {"engine": "api", "text": text, "latency_ms": lat})
 	transcribed.emit(text)
 
 ## ---------- TTS (macOS say + Godot 內部播放 + spectrum lipsync) ----------
