@@ -141,7 +141,7 @@ jobs:
           $godot = $env:GODOT + ".exe"
           New-Item -ItemType Directory -Force -Path build | Out-Null
           $p = Start-Process -FilePath $godot `
-            -ArgumentList "--headless","--path",(Resolve-Path .).Path,"--export-release","Windows Desktop",(Join-Path (Resolve-Path .).Path "build\DoroPet.exe") `
+            -ArgumentList "--headless","--path",(Resolve-Path .).Path,"--export-release","windows",(Join-Path (Resolve-Path .).Path "build\DoroPet.exe") `
             -Wait -NoNewWindow -PassThru `
             -RedirectStandardOutput "godot_export.log" -RedirectStandardError "godot_export.err"
           Write-Host "export exit=$($p.ExitCode)"
