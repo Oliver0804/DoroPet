@@ -86,6 +86,9 @@ jobs:
             Copy-Item $coreDll addons/gd_cubism/bin/
           }
           Get-ChildItem addons/gd_cubism/bin/
+          ## 讓 Godot 跳過整個 vendor/ 目錄（不掃描、不匯入）
+          New-Item -ItemType File -Force -Path vendor/.gdignore | Out-Null
+          Write-Host "Created vendor/.gdignore"
 
       - name: Setup Godot
         uses: chickensoft-games/setup-godot@v2
@@ -125,8 +128,9 @@ jobs:
         run: |
           $godot = "$env:GODOT.exe"
           New-Item -ItemType Directory -Force -Path build | Out-Null
-          & $godot --headless --path . --export-release "Windows Desktop" "build\DoroPet.exe"
+          & $godot --headless --path . --export-release --verbose "Windows Desktop" "build\DoroPet.exe"
           Write-Host "=== export exit=$LASTEXITCODE ==="
+          Get-ChildItem build\ -ErrorAction SilentlyContinue
           if (-not (Test-Path "build\DoroPet.exe")) { throw "Export failed: build\DoroPet.exe missing" }
           Copy-Item -Recurse -Force addons\gd_cubism\bin\* build\
           Get-ChildItem build\
