@@ -98,8 +98,22 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "Using GODOT=$env:GODOT"
-          & $env:GODOT --headless --path . --import --quit
-          & $env:GODOT --headless --path . --import --quit
+          Get-Item $env:GODOT* 2>&1 | Format-List
+          ## 用 .cmd 路徑 explicit invoke
+          $godot = $env:GODOT
+          if (Test-Path "$godot.cmd") { $godot = "$godot.cmd" }
+          elseif (Test-Path "$godot.exe") { $godot = "$godot.exe" }
+          Write-Host "Will invoke: $godot"
+          & $godot --version
+          Write-Host "=== running import ==="
+          & $godot --headless --path . --import --verbose --quit
+          $rc1 = $LASTEXITCODE
+          Write-Host "=== first import exit=$rc1 ==="
+          & $godot --headless --path . --import --quit
+          $rc2 = $LASTEXITCODE
+          Write-Host "=== second import exit=$rc2 ==="
+          Write-Host "=== .godot dir ==="
+          Get-ChildItem .godot -ErrorAction SilentlyContinue
           if (-not (Test-Path .godot)) { throw "Import failed: .godot not generated" }
 
       - name: Export Windows Desktop
