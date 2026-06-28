@@ -114,15 +114,25 @@ jobs:
         shell: pwsh
         run: |
           $godot = $env:GODOT + ".exe"
-          Write-Host "godot=$godot exists=$(Test-Path $godot)"
           if (-not (Test-Path $godot)) { throw "godot.exe not found at $godot" }
-          Write-Host "=== first import ==="
-          & $godot --headless --path . --import
-          Write-Host "=== first exit=$LASTEXITCODE ==="
-          Write-Host "=== second import ==="
-          & $godot --headless --path . --import
-          Write-Host "=== second exit=$LASTEXITCODE ==="
+          ## 用 Start-Process -Wait 強制等子程序結束(& 會被 godot detach 騙)
+          ## 重定向到 file 才能等 — Out-Host pipe 在 .exe detach 場景仍可能丟失
+          Remove-Item -Recurse -Force .godot -ErrorAction SilentlyContinue
+          1..2 | ForEach-Object {
+            Write-Host "=== import attempt $_ ==="
+            $p = Start-Process -FilePath $godot `
+              -ArgumentList "--headless","--path",(Resolve-Path .).Path,"--import" `
+              -Wait -NoNewWindow -PassThru `
+              -RedirectStandardOutput "godot_import_$_.log" -RedirectStandardError "godot_import_$_.err"
+            Write-Host "exit=$($p.ExitCode)"
+            if (Test-Path "godot_import_$_.log") { Get-Content "godot_import_$_.log" | Select-Object -Last 30 }
+            if (Test-Path "godot_import_$_.err") {
+              $err = Get-Content "godot_import_$_.err"
+              if ($err) { Write-Host "--- stderr ---"; $err | Select-Object -Last 10 }
+            }
+          }
           if (-not (Test-Path .godot)) { throw "Import failed: .godot not generated" }
+          Write-Host "=== .godot top-level ==="
           Get-ChildItem .godot | Format-Table -AutoSize
 
       - name: Export Windows Desktop
@@ -130,9 +140,16 @@ jobs:
         run: |
           $godot = $env:GODOT + ".exe"
           New-Item -ItemType Directory -Force -Path build | Out-Null
-          & $godot --headless --path . --export-release --verbose "Windows Desktop" "build\DoroPet.exe"
-          Write-Host "=== export exit=$LASTEXITCODE ==="
-          Get-ChildItem build\ -ErrorAction SilentlyContinue
+          $p = Start-Process -FilePath $godot `
+            -ArgumentList "--headless","--path",(Resolve-Path .).Path,"--export-release","Windows Desktop",(Join-Path (Resolve-Path .).Path "build\DoroPet.exe") `
+            -Wait -NoNewWindow -PassThru `
+            -RedirectStandardOutput "godot_export.log" -RedirectStandardError "godot_export.err"
+          Write-Host "export exit=$($p.ExitCode)"
+          if (Test-Path "godot_export.log") { Get-Content "godot_export.log" | Select-Object -Last 60 }
+          if (Test-Path "godot_export.err") {
+            $err = Get-Content "godot_export.err"
+            if ($err) { Write-Host "--- stderr ---"; $err | Select-Object -Last 30 }
+          }
           if (-not (Test-Path "build\DoroPet.exe")) { throw "Export failed: build\DoroPet.exe missing" }
           Copy-Item -Recurse -Force addons\gd_cubism\bin\* build\
           Get-ChildItem build\
