@@ -1,0 +1,25 @@
+# Godot
+.godot/
+.import/
+export.cfg
+export_presets.cfg
+*.translation
+
+# macOS
+.DS_Store
+
+# 第三方來源全部不入版控（含 SDK、編譯產物、godot-cpp 子模組）
+# 由 scripts_sh/00_install.sh 一鍵拉回
+vendor/
+addons/
+
+# 編譯暫存
+*.o
+*.os
+*.obj
+.sconsign.dblite
+
+# 系統秘密 / log
+*.log
+build_*.log
+*.env
