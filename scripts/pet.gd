@@ -609,6 +609,8 @@ func _on_recording_started() -> void:
 	_recording_ui = true
 	_bubble_timer.stop()
 	_update_recording_bubble(0.0)
+	## 錄音 bubble 兩行字 → 給足固定 size,免高度被切
+	_bubble_window.size = Vector2i(380, 78)
 	_bubble_window.show()
 	_reposition_bubble()
 
@@ -618,18 +620,15 @@ func _on_recording_stopped() -> void:
 	_bubble_timer.stop()
 
 func _on_voice_transcribed(text: String) -> void:
-	_end_thinking()
-	## STT 完成 → 填到輸入框，user 可編輯後 Enter 送出
+	## STT 完成 → 直接送，不等 user 按 Enter
 	if _input_box != null and _input_window.visible:
-		_input_box.text = text
-		_input_box.caret_column = text.length()
-		_input_box.grab_focus()
-	else:
-		## 輸入框已被關掉就直接送
-		_last_input_voice = true
-		_begin_thinking()
-		_show_bubble("「%s」" % text, 2.0)
-		_chat.call("send", text)
+		_close_input()
+	_last_input_voice = true
+	## _begin_thinking 已在錄音停止時呼叫,這裡先顯示 user 講的話
+	_show_bubble("「%s」" % text, 2.0)
+	## 短暫延遲後送 chat(讓使用者看到自己講了什麼)
+	await get_tree().create_timer(0.3).timeout
+	_chat.call("send", text)
 
 func _on_voice_error(reason: String) -> void:
 	_end_thinking()
