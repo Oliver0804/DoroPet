@@ -1,0 +1,103 @@
+name: Build Windows
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "scenes/**"
+      - "assets/**"
+      - "project.godot"
+      - "export_presets.cfg"
+      - ".github/workflows/build-windows.yml"
+
+env:
+  GODOT_VERSION: "4.6.2"
+  GD_CUBISM_TAG: "v0.9.1"
+  SDK_URL: "https://cubism.live2d.com/sdk-native/bin/CubismSdkForNative-5-r.1.zip"
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup MSVC dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install scons
+        shell: pwsh
+        run: pip install "scons==4.7"
+
+      - name: Clone gd_cubism + submodules
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch $env:GD_CUBISM_TAG --recurse-submodules `
+            https://github.com/MizunagiKB/gd_cubism.git vendor/gd_cubism
+
+      - name: Download Cubism SDK 5-r.1
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri $env:SDK_URL -OutFile sdk.zip
+          Expand-Archive -Path sdk.zip -DestinationPath vendor/gd_cubism/thirdparty/
+          Remove-Item sdk.zip
+          Get-ChildItem vendor/gd_cubism/thirdparty/
+
+      - name: Build gd_cubism (Windows x86_64)
+        shell: pwsh
+        working-directory: vendor/gd_cubism
+        run: |
+          scons platform=windows arch=x86_64 target=template_debug -j2
+          scons platform=windows arch=x86_64 target=template_release -j2
+
+      - name: Stage addons to project
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path addons
+          Copy-Item -Recurse -Force vendor/gd_cubism/demo/addons/gd_cubism addons/
+          # 把 Live2D Core DLL 也搬到 plugin bin（runtime 載入需要）
+          $coreDll = "vendor/gd_cubism/thirdparty/CubismSdkForNative-5-r.1/Core/dll/windows/x86_64/Live2DCubismCore.dll"
+          if (Test-Path $coreDll) {
+            Copy-Item $coreDll addons/gd_cubism/bin/
+          }
+          Get-ChildItem addons/gd_cubism/bin/
+
+      - name: Setup Godot
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: ${{ env.GODOT_VERSION }}
+          use-dotnet: false
+          include-templates: true
+
+      - name: Import project (headless)
+        shell: pwsh
+        run: |
+          godot --headless --path . --import --quit 2>&1 | Out-Host
+          # 第一次 import 可能 exit non-zero,再跑一次確保 cache 建好
+          godot --headless --path . --import --quit 2>&1 | Out-Host
+          if (!(Test-Path .godot)) { throw "Import failed: .godot not generated" }
+
+      - name: Export Windows Desktop
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path build
+          godot --headless --path . --export-release "Windows Desktop" build/DoroPet.exe
+          if (!(Test-Path build/DoroPet.exe)) { throw "Export failed: build/DoroPet.exe missing" }
+          # 把 plugin DLL + Core DLL 也 ship 到 build/
+          Copy-Item -Recurse addons/gd_cubism/bin/* build/
+          Get-ChildItem build/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DoroPet-Windows-x86_64
+          path: build/
+          retention-days: 14
