@@ -94,33 +94,39 @@ jobs:
           use-dotnet: false
           include-templates: true
 
+      - name: Rename godot to godot.exe
+        shell: pwsh
+        run: |
+          ## chickensoft setup-godot 安裝的 binary 沒副檔名 → Windows 無法直接 exec
+          ## 改名後 PowerShell / cmd / bash 都能跑
+          $src = $env:GODOT
+          $dst = "$src.exe"
+          if (-not (Test-Path $dst)) {
+            Copy-Item $src $dst
+            Write-Host "Copied $src to $dst"
+          }
+          & $dst --version
+
       - name: Import project (headless)
         shell: pwsh
         run: |
-          Write-Host "Using GODOT=$env:GODOT"
-          Get-Item $env:GODOT* 2>&1 | Format-List
-          ## 用 .cmd 路徑 explicit invoke
-          $godot = $env:GODOT
-          if (Test-Path "$godot.cmd") { $godot = "$godot.cmd" }
-          elseif (Test-Path "$godot.exe") { $godot = "$godot.exe" }
-          Write-Host "Will invoke: $godot"
-          & $godot --version
-          Write-Host "=== running import ==="
-          & $godot --headless --path . --import --verbose --quit
-          $rc1 = $LASTEXITCODE
-          Write-Host "=== first import exit=$rc1 ==="
-          & $godot --headless --path . --import --quit
-          $rc2 = $LASTEXITCODE
-          Write-Host "=== second import exit=$rc2 ==="
-          Write-Host "=== .godot dir ==="
-          Get-ChildItem .godot -ErrorAction SilentlyContinue
+          $godot = "$env:GODOT.exe"
+          Write-Host "=== first import ==="
+          & $godot --headless --path . --import --verbose
+          Write-Host "=== first exit=$LASTEXITCODE ==="
+          Write-Host "=== second import ==="
+          & $godot --headless --path . --import
+          Write-Host "=== second exit=$LASTEXITCODE ==="
+          Get-ChildItem .godot -ErrorAction SilentlyContinue | Format-Table -AutoSize
           if (-not (Test-Path .godot)) { throw "Import failed: .godot not generated" }
 
       - name: Export Windows Desktop
         shell: pwsh
         run: |
+          $godot = "$env:GODOT.exe"
           New-Item -ItemType Directory -Force -Path build | Out-Null
-          & $env:GODOT --headless --path . --export-release "Windows Desktop" "build\DoroPet.exe"
+          & $godot --headless --path . --export-release "Windows Desktop" "build\DoroPet.exe"
+          Write-Host "=== export exit=$LASTEXITCODE ==="
           if (-not (Test-Path "build\DoroPet.exe")) { throw "Export failed: build\DoroPet.exe missing" }
           Copy-Item -Recurse -Force addons\gd_cubism\bin\* build\
           Get-ChildItem build\
