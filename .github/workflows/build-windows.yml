@@ -12,6 +12,10 @@ on:
       - "export_presets.cfg"
       - ".github/workflows/build-windows.yml"
 
+concurrency:
+  group: build-windows-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   GODOT_VERSION: "4.6.2"
   GD_CUBISM_TAG: "v0.9.1"
@@ -78,22 +82,20 @@ jobs:
           include-templates: true
 
       - name: Import project (headless)
-        shell: pwsh
+        shell: cmd
         run: |
-          godot --headless --path . --import --quit 2>&1 | Out-Host
-          # 第一次 import 可能 exit non-zero,再跑一次確保 cache 建好
-          godot --headless --path . --import --quit 2>&1 | Out-Host
-          if (!(Test-Path .godot)) { throw "Import failed: .godot not generated" }
+          godot --headless --path . --import --quit
+          godot --headless --path . --import --quit
+          if not exist .godot ( echo Import failed: .godot not generated && exit /b 1 )
 
       - name: Export Windows Desktop
-        shell: pwsh
+        shell: cmd
         run: |
-          New-Item -ItemType Directory -Force -Path build
-          godot --headless --path . --export-release "Windows Desktop" build/DoroPet.exe
-          if (!(Test-Path build/DoroPet.exe)) { throw "Export failed: build/DoroPet.exe missing" }
-          # 把 plugin DLL + Core DLL 也 ship 到 build/
-          Copy-Item -Recurse addons/gd_cubism/bin/* build/
-          Get-ChildItem build/
+          mkdir build
+          godot --headless --path . --export-release "Windows Desktop" build\DoroPet.exe
+          if not exist build\DoroPet.exe ( echo Export failed && exit /b 1 )
+          xcopy /E /I /Y addons\gd_cubism\bin build
+          dir build
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
