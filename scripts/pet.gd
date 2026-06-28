@@ -30,6 +30,11 @@ const EMOTION_MAP: Dictionary = {
 	9: "TongueOut",     ## 調皮吐舌頭
 	10: "Highlight OFF",## 失神
 }
+## 給 UI 顯示的人類可讀名（順序與 EMOTION_MAP 對齊）
+const EMOTION_LABELS: Array = [
+	"😠 生氣", "😑 無言", "😲 驚訝", "❓ 疑問", "😎 酷酷",
+	"🎁 禮物", "⏳ 讀取中", "😄 開心", "😝 調皮吐舌", "😵 失神",
+]
 var _drag_offset: Vector2 = Vector2.ZERO
 var _dragging: bool = false
 var _menu: PopupMenu
@@ -140,6 +145,14 @@ func _build_menu() -> void:
 	_menu.add_item("跟 Doro 對話", 30)
 	_menu.add_item("清空對話", 31)
 	_menu.add_separator()
+	## 表情子選單(直接挑 10 種)
+	var emo_sub: PopupMenu = PopupMenu.new()
+	emo_sub.name = "EmotionSubMenu"
+	for i in EMOTION_LABELS.size():
+		emo_sub.add_item(EMOTION_LABELS[i], 100 + (i + 1))   ## id = 101..110 對應 emotion 1..10
+	emo_sub.id_pressed.connect(_on_menu)
+	_menu.add_child(emo_sub)
+	_menu.add_submenu_item("選擇表情 ▸", "EmotionSubMenu")
 	_menu.add_item("下一個表情", 0)
 	_menu.add_item("重設表情", 1)
 	_menu.add_separator()
@@ -154,6 +167,10 @@ func _build_menu() -> void:
 	add_child(_menu)
 
 func _on_menu(id: int) -> void:
+	## 101..110 是 emotion submenu(直接設指定表情)
+	if id >= 101 and id <= 110:
+		_set_emotion(id - 100)
+		return
 	match id:
 		0:
 			_cycle_expression()
