@@ -123,8 +123,9 @@ func _build_ui() -> void:
 	vb.add_child(scale_row)
 
 	## 視線跟隨強度
-	_head_slider = _slider_row(vb, "視線(頭)", 0.0, 60.0, 1.0)
-	_eye_slider = _slider_row(vb, "視線(眼)", 0.0, 2.0, 0.05)
+	## min 設 1 / 0.05,避免拉到 0 後 Doro 看起來「死掉」
+	_head_slider = _slider_row(vb, "視線(頭)", 1.0, 60.0, 1.0)
+	_eye_slider = _slider_row(vb, "視線(眼)", 0.05, 2.0, 0.05)
 
 	_gaze_check = CheckBox.new()
 	_gaze_check.text = "啟用視線跟滑鼠"
