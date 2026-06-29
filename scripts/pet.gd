@@ -250,6 +250,12 @@ func _reset_expression() -> void:
 	_expression_index = 0
 
 func _process(dt: float) -> void:
+	## 防拖曳卡死:_dragging=true 但實際左鍵沒按下 → reset
+	## (popup/輸入框可能吃掉 release event 讓 _input 沒收到)
+	if _dragging and not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+		_dragging = false
+		_drag_offset = Vector2.ZERO
+
 	## 每 frame 只拉一次 RMS,meter / VAD 共用
 	var rms: float = 0.0
 	if _voice != null:
@@ -374,6 +380,10 @@ func _input(event: InputEvent) -> void:
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN and event.pressed:
 			_adjust_scale(1.0 / SCALE_STEP)
 	elif event is InputEventMouseMotion and _dragging:
+		## 雙重保險:確認左鍵真的還按著才搬視窗
+		if not Input.is_mouse_button_pressed(MOUSE_BUTTON_LEFT):
+			_dragging = false
+			return
 		var new_pos: Vector2i = DisplayServer.mouse_get_position() - Vector2i(_drag_offset)
 		DisplayServer.window_set_position(new_pos)
 		_reposition_bubble()
