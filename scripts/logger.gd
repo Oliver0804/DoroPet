@@ -66,3 +66,18 @@ static func read_log(path: String, max_entries: int = 200) -> Array:
 ## 回傳 logs 目錄絕對路徑（給「開啟資料夾」用）
 static func get_log_dir_abs() -> String:
 	return ProjectSettings.globalize_path(LOG_DIR)
+
+## 把截圖存到 logs/screenshots/YYYY-MM-DD/HHMMSS.png,回 absolute path
+static func save_screenshot(png_bytes: PackedByteArray) -> String:
+	var date_str: String = Time.get_date_string_from_system()
+	var t: Dictionary = Time.get_time_dict_from_system()
+	var ts: String = "%02d%02d%02d_%03d" % [t.hour, t.minute, t.second, Time.get_ticks_msec() % 1000]
+	var sub_dir: String = "%s/screenshots/%s" % [LOG_DIR, date_str]
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(sub_dir))
+	var rel_path: String = "%s/%s.png" % [sub_dir, ts]
+	var f: FileAccess = FileAccess.open(rel_path, FileAccess.WRITE)
+	if f == null:
+		return ""
+	f.store_buffer(png_bytes)
+	f.close()
+	return ProjectSettings.globalize_path(rel_path)

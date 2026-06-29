@@ -65,6 +65,12 @@ var _stt_cloud_rows: Array[Control] = []
 ## 自動更新
 var _auto_update_check: CheckBox
 
+## 視覺 + 主動搭話
+var _vision_check: CheckBox
+var _proactive_check: CheckBox
+var _proactive_min_spin: SpinBox
+var _proactive_max_spin: SpinBox
+
 ## VAD
 var _vad_check: CheckBox
 var _vad_threshold_slider: HSlider
@@ -119,6 +125,10 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 	_hotkey_mods = int(initial.get("hotkey_mods", 0))
 	_refresh_hotkey_btn()
 	_auto_update_check.button_pressed = bool(initial.get("auto_check_updates", true))
+	_vision_check.button_pressed = bool(initial.get("vision_enabled", true))
+	_proactive_check.button_pressed = bool(initial.get("proactive_chat_enabled", false))
+	_proactive_min_spin.value = float(initial.get("proactive_chat_min_sec", 600.0))
+	_proactive_max_spin.value = float(initial.get("proactive_chat_max_sec", 1800.0))
 	_vad_check.button_pressed = bool(initial.get("vad_enabled", true))
 	_vad_threshold_slider.value = float(initial.get("vad_threshold", 0.02))
 	_vad_silence_spin.value = float(initial.get("vad_silence_sec", 1.2))
@@ -354,6 +364,42 @@ func _build_ui() -> void:
 	_persona_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
 	_persona_edit.text_changed.connect(_on_persona_changed)
 	vb.add_child(_persona_edit)
+
+	## 視覺輸入(screen 關鍵字截圖)
+	_vision_check = CheckBox.new()
+	_vision_check.text = "📸 講『螢幕』『你看』等關鍵字時自動附帶截圖"
+	_vision_check.toggled.connect(_on_any_toggled)
+	vb.add_child(_vision_check)
+
+	## 主動搭話
+	_proactive_check = CheckBox.new()
+	_proactive_check.text = "💬 Doro 偶爾主動搭話"
+	_proactive_check.toggled.connect(_on_any_toggled)
+	vb.add_child(_proactive_check)
+
+	var pro_row: HBoxContainer = HBoxContainer.new()
+	var pro_cap: Label = Label.new()
+	pro_cap.text = "  間隔"
+	pro_cap.custom_minimum_size = Vector2(80, 0)
+	_proactive_min_spin = SpinBox.new()
+	_proactive_min_spin.min_value = 60
+	_proactive_min_spin.max_value = 3600
+	_proactive_min_spin.step = 30
+	_proactive_min_spin.suffix = " 秒"
+	_proactive_min_spin.value_changed.connect(_on_any_changed)
+	var pro_dash: Label = Label.new()
+	pro_dash.text = " ~ "
+	_proactive_max_spin = SpinBox.new()
+	_proactive_max_spin.min_value = 60
+	_proactive_max_spin.max_value = 7200
+	_proactive_max_spin.step = 30
+	_proactive_max_spin.suffix = " 秒"
+	_proactive_max_spin.value_changed.connect(_on_any_changed)
+	pro_row.add_child(pro_cap)
+	pro_row.add_child(_proactive_min_spin)
+	pro_row.add_child(pro_dash)
+	pro_row.add_child(_proactive_max_spin)
+	vb.add_child(pro_row)
 
 	## ---------- 🎙 STT — 語音輸入 ----------
 	vb.add_child(_separator())
@@ -623,6 +669,10 @@ func _collect() -> Dictionary:
 		"hotkey_mods": _hotkey_mods,
 		"vad_enabled": _vad_check.button_pressed,
 		"auto_check_updates": _auto_update_check.button_pressed,
+		"vision_enabled": _vision_check.button_pressed,
+		"proactive_chat_enabled": _proactive_check.button_pressed,
+		"proactive_chat_min_sec": _proactive_min_spin.value,
+		"proactive_chat_max_sec": _proactive_max_spin.value,
 		"vad_threshold": _vad_threshold_slider.value,
 		"vad_silence_sec": _vad_silence_spin.value,
 	}

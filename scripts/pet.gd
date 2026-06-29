@@ -90,10 +90,16 @@ const SettingsDialog := preload("res://scripts/settings_dialog.gd")
 const VoiceClient := preload("res://scripts/voice_client.gd")
 const LogsViewer := preload("res://scripts/logs_viewer.gd")
 const Updater := preload("res://scripts/updater.gd")
+const DoroLogger := preload("res://scripts/logger.gd")
 var _logs_viewer: Window
 var _updater: Node
 var _update_url: String = ""
 var _auto_check_updates: bool = true
+var _vision_enabled: bool = true                ## 關鍵字截圖視覺
+var _proactive_chat_enabled: bool = false       ## Doro 主動搭話
+var _proactive_chat_min_sec: float = 600.0      ## idle 多久觸發(預設 10 分鐘)
+var _proactive_chat_max_sec: float = 1800.0     ## 上限 30 分鐘
+var _proactive_timer: Timer
 
 ## 系統匣 / menu bar 圖示
 var _tray_id: int = -1
@@ -140,6 +146,39 @@ func _ready() -> void:
 	_setup_auto_emotion()
 	_setup_updater()
 	_setup_tray()
+	_setup_proactive_chat()
+
+## ---------- 主動搭話 ----------
+func _setup_proactive_chat() -> void:
+	_proactive_timer = Timer.new()
+	_proactive_timer.one_shot = true
+	_proactive_timer.timeout.connect(_on_proactive_timer)
+	add_child(_proactive_timer)
+	if _proactive_chat_enabled:
+		_schedule_proactive()
+
+func _schedule_proactive() -> void:
+	if not _proactive_chat_enabled or _proactive_timer == null:
+		return
+	var sec: float = randf_range(_proactive_chat_min_sec, _proactive_chat_max_sec)
+	_proactive_timer.start(sec)
+
+func _on_proactive_timer() -> void:
+	## 處理中 / 對話開啟時跳過,重排
+	if _thinking or (_input_window != null and _input_window.visible) or not _proactive_chat_enabled:
+		_schedule_proactive()
+		return
+	if _chat == null or not _chat.call("is_enabled"):
+		_schedule_proactive()
+		return
+	## 用特殊 prompt 讓 LLM 主動產生一句搭話
+	_last_input_voice = false
+	_begin_thinking()
+	_show_bubble("…(Doro 想說話)", 999.0)
+	_chat.call("send", "(系統提示:主人靜默了一段時間,你主動找他/她聊個有趣或關心的話題,維持 30 字內。)")
+	_schedule_proactive()
+
+## ---------- 結束 ----------
 
 ## ---------- 系統匣 / menu bar ----------
 func _setup_tray() -> void:
@@ -862,12 +901,13 @@ func _wants_screenshot(text: String) -> bool:
 	return false
 
 func _grab_screenshot_b64() -> String:
+	if not _vision_enabled:
+		return ""
 	var path: String = _platform_temp_dir() + "/doropet_screen.png"
 	var rc: int = -1
 	if OS.get_name() == "macOS":
 		rc = OS.execute("/usr/sbin/screencapture", ["-x", "-t", "png", "-m", path], [], false)
 	elif OS.get_name() == "Windows":
-		## PowerShell:抓主螢幕 → 存 PNG
 		var ps_path: String = path.replace("/", "\\")
 		var script: String = (
 			"Add-Type -AssemblyName System.Windows.Forms,System.Drawing;" +
@@ -887,6 +927,10 @@ func _grab_screenshot_b64() -> String:
 		return ""
 	var bytes: PackedByteArray = f.get_buffer(f.get_length())
 	f.close()
+	## 存到 logs/screenshots/YYYY-MM-DD/ 給 user 查
+	var saved_path: String = DoroLogger.save_screenshot(bytes)
+	if saved_path != "":
+		DoroLogger.log("screenshot_captured", {"path": saved_path, "bytes": bytes.size()})
 	return Marshalls.raw_to_base64(bytes)
 
 func _platform_temp_dir() -> String:
@@ -1121,6 +1165,10 @@ func _open_settings() -> void:
 		"vad_silence_sec": _vad_silence_sec,
 		"msaa": _msaa,
 		"auto_check_updates": _auto_check_updates,
+		"vision_enabled": _vision_enabled,
+		"proactive_chat_enabled": _proactive_chat_enabled,
+		"proactive_chat_min_sec": _proactive_chat_min_sec,
+		"proactive_chat_max_sec": _proactive_chat_max_sec,
 	}
 	_settings.open(data, _chat.call("get_status"), _voice.call("stt_status") if _voice else "")
 
@@ -1158,6 +1206,16 @@ func _on_settings_changed(data: Dictionary) -> void:
 				_updater.call("start_polling")
 			else:
 				_updater.call("stop_polling")
+	_vision_enabled = bool(data.get("vision_enabled", _vision_enabled))
+	var new_proactive: bool = bool(data.get("proactive_chat_enabled", _proactive_chat_enabled))
+	_proactive_chat_min_sec = float(data.get("proactive_chat_min_sec", _proactive_chat_min_sec))
+	_proactive_chat_max_sec = float(data.get("proactive_chat_max_sec", _proactive_chat_max_sec))
+	if new_proactive != _proactive_chat_enabled:
+		_proactive_chat_enabled = new_proactive
+		if _proactive_chat_enabled:
+			_schedule_proactive()
+		elif _proactive_timer:
+			_proactive_timer.stop()
 	_apply_scale()
 	get_window().always_on_top = _always_on_top
 	if _chat:
@@ -1201,6 +1259,10 @@ func _load_config() -> void:
 	_vad_silence_sec = float(cfg.get_value("pet", "vad_silence_sec", _vad_silence_sec))
 	_msaa = int(cfg.get_value("pet", "msaa", _msaa))
 	_auto_check_updates = bool(cfg.get_value("pet", "auto_check_updates", _auto_check_updates))
+	_vision_enabled = bool(cfg.get_value("pet", "vision_enabled", _vision_enabled))
+	_proactive_chat_enabled = bool(cfg.get_value("pet", "proactive_chat_enabled", _proactive_chat_enabled))
+	_proactive_chat_min_sec = float(cfg.get_value("pet", "proactive_chat_min_sec", _proactive_chat_min_sec))
+	_proactive_chat_max_sec = float(cfg.get_value("pet", "proactive_chat_max_sec", _proactive_chat_max_sec))
 
 func _save_config() -> void:
 	var cfg: ConfigFile = ConfigFile.new()
@@ -1221,6 +1283,10 @@ func _save_config() -> void:
 	cfg.set_value("pet", "vad_silence_sec", _vad_silence_sec)
 	cfg.set_value("pet", "msaa", _msaa)
 	cfg.set_value("pet", "auto_check_updates", _auto_check_updates)
+	cfg.set_value("pet", "vision_enabled", _vision_enabled)
+	cfg.set_value("pet", "proactive_chat_enabled", _proactive_chat_enabled)
+	cfg.set_value("pet", "proactive_chat_min_sec", _proactive_chat_min_sec)
+	cfg.set_value("pet", "proactive_chat_max_sec", _proactive_chat_max_sec)
 	if _chat:
 		cfg.set_value("chat", "api_key", _chat.call("get_api_key"))
 		cfg.set_value("chat", "model", _chat.call("get_model"))

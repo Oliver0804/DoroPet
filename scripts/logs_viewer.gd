@@ -75,6 +75,12 @@ func _ready() -> void:
 	_entries.scroll_following = false
 	_entries.selection_enabled = true
 	_entries.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_entries.meta_clicked.connect(func(meta: Variant) -> void:
+		var u: String = String(meta)
+		if u.begins_with("file://"):
+			OS.shell_open(u.substr(7))
+		else:
+			OS.shell_open(u))
 	split.add_child(_entries)
 
 func open() -> void:
@@ -170,6 +176,8 @@ func _format_entry(e: Dictionary) -> String:
 		color = "#d04848"
 	elif typ.ends_with("_request"):
 		color = "#3a7ed8"
+	elif typ == "screenshot_captured":
+		color = "#c08040"
 	var head: String = "[color=%s][b]%s[/b][/color]  [color=#888]%s[/color]" % [color, typ, ts]
 	var body_parts: PackedStringArray = []
 	for k in e.keys():
@@ -178,5 +186,9 @@ func _format_entry(e: Dictionary) -> String:
 		var s: String = JSON.stringify(val) if typeof(val) != TYPE_STRING else String(val)
 		if s.length() > 300:
 			s = s.substr(0, 300) + "…"
-		body_parts.append("  %s: %s" % [k, s])
+		## 截圖路徑做成可點連結
+		if k == "path" and typ == "screenshot_captured":
+			body_parts.append("  %s: [url=file://%s][color=#4ea3ff]%s[/color][/url]" % [k, val, val])
+		else:
+			body_parts.append("  %s: %s" % [k, s])
 	return head + "\n" + "\n".join(body_parts) + "\n"
