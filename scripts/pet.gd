@@ -536,15 +536,25 @@ func _wants_screenshot(text: String) -> bool:
 	return false
 
 func _grab_screenshot_b64() -> String:
-	if OS.get_name() != "macOS":
+	var path: String = _platform_temp_dir() + "/doropet_screen.png"
+	var rc: int = -1
+	if OS.get_name() == "macOS":
+		rc = OS.execute("/usr/sbin/screencapture", ["-x", "-t", "png", "-m", path], [], false)
+	elif OS.get_name() == "Windows":
+		## PowerShell:抓主螢幕 → 存 PNG
+		var ps_path: String = path.replace("/", "\\")
+		var script: String = (
+			"Add-Type -AssemblyName System.Windows.Forms,System.Drawing;" +
+			"$s=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds;" +
+			"$b=New-Object System.Drawing.Bitmap $s.Width,$s.Height;" +
+			"$g=[System.Drawing.Graphics]::FromImage($b);" +
+			"$g.CopyFromScreen($s.Location,[System.Drawing.Point]::Empty,$s.Size);" +
+			"$b.Save('%s',[System.Drawing.Imaging.ImageFormat]::Png);" +
+			"$g.Dispose();$b.Dispose();") % ps_path
+		rc = OS.execute("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], [], false)
+	else:
 		return ""
-	var tmp: String = OS.get_environment("TMPDIR")
-	if tmp == "":
-		tmp = "/tmp/"
-	var path: String = tmp + "doropet_screen.png"
-	## -x = 無聲, -t png = PNG, -m = 主螢幕
-	var rc: int = OS.execute("/usr/sbin/screencapture", ["-x", "-t", "png", "-m", path], [], false)
-	if rc != 0:
+	if rc != 0 or not FileAccess.file_exists(path):
 		return ""
 	var f: FileAccess = FileAccess.open(path, FileAccess.READ)
 	if f == null:
@@ -552,6 +562,19 @@ func _grab_screenshot_b64() -> String:
 	var bytes: PackedByteArray = f.get_buffer(f.get_length())
 	f.close()
 	return Marshalls.raw_to_base64(bytes)
+
+func _platform_temp_dir() -> String:
+	if OS.get_name() == "Windows":
+		var t: String = OS.get_environment("TEMP")
+		if t == "":
+			t = OS.get_environment("TMP")
+		if t == "":
+			t = "C:\\Windows\\Temp"
+		return t
+	var t2: String = OS.get_environment("TMPDIR")
+	if t2 == "":
+		t2 = "/tmp"
+	return t2.rstrip("/")
 
 func _on_input_text_changed(_t: String) -> void:
 	## 使用者開始打字 → 中止錄音（避免 STT 結果覆蓋 user 輸入）

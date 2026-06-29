@@ -29,11 +29,23 @@ echo 'export OPENROUTER_API_KEY=sk-or-v1-xxxxxxxx' > ~/.doropet.env
 
 對話會保留最近 8 對歷史；右鍵選單「清空對話」可重置。
 
-## 一鍵安裝(macOS Apple Silicon)
+## 一鍵安裝
 
+### macOS Apple Silicon
 ```bash
 bash scripts_sh/00_install.sh
 ```
+
+### Windows x64
+1. 去 [GitHub Actions](https://github.com/Oliver0804/DoroPet/actions/workflows/build-windows.yml) 下載最新成功 build 的 `DoroPet-Windows-x86_64` artifact,解壓到任意資料夾
+2. 安裝 whisper.cpp + 模型(語音功能用):
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts_sh\00_install.ps1
+   ```
+3. 設 API key:`setx OPENROUTER_API_KEY sk-or-v1-xxx`
+4. 雙擊 `DoroPet.exe` 啟動
+
+Windows 上 TTS 走系統內建 SAPI(免裝),截圖走 PowerShell `System.Drawing`,中文聲音可在設定面板挑(預設 `Microsoft Hanhan` / `Microsoft Yating` 等,看你系統有哪些)。
 
 會自動:clone gd_cubism + 下載 Cubism SDK 5-r.1 + `brew install scons whisper-cpp` + 下 whisper ggml-base 模型 + 編譯 plugin(首次 10–20 分鐘)。
 

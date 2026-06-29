@@ -13,9 +13,14 @@ signal speaking_finished
 
 const DEFAULT_STT_ENDPOINT: String = "https://api.openai.com/v1/audio/transcriptions"
 const DEFAULT_STT_MODEL: String = "whisper-1"
-const DEFAULT_LOCAL_BIN: String = "/opt/homebrew/bin/whisper-cli"   ## macOS Apple Silicon 預設
 const DEFAULT_LOCAL_MODEL_DIR: String = "whisper-models"            ## 相對於 user://
 const TMP_WAV: String = "user://doro_record.wav"
+
+static func default_local_bin() -> String:
+	match OS.get_name():
+		"macOS":   return "/opt/homebrew/bin/whisper-cli"
+		"Windows": return "whisper-cli.exe"          ## 透過 PATH 找
+		_:         return "whisper-cli"
 
 var _bus_idx: int = -1
 var _eff: AudioEffectCapture            ## 錄音用（不要被 meter 吃掉）
@@ -35,10 +40,16 @@ var _engine: String = "local"        ## "local" | "api"
 var _api_key: String = ""
 var _endpoint: String = DEFAULT_STT_ENDPOINT
 var _model: String = DEFAULT_STT_MODEL
-var _local_bin: String = DEFAULT_LOCAL_BIN
+var _local_bin: String = ""
 var _local_model: String = ""        ## 完整路徑指向 ggml-*.bin
-var _voice: String = "Mei-Jia"   ## macOS 中文女聲；可用 "Tingting" "Sin-ji" 等
+var _voice: String = ""              ## 預設聲音(依 OS)
 var _tts_enabled: bool = true
+
+static func default_voice() -> String:
+	match OS.get_name():
+		"macOS":   return "Mei-Jia"            ## 繁中女
+		"Windows": return "Microsoft Hanhan"   ## 台繁(若未裝會 fallback default)
+		_:         return ""
 
 const DoroLogger := preload("res://scripts/logger.gd")
 var _http: HTTPRequest
@@ -53,9 +64,16 @@ func _ready() -> void:
 	if ep != "":
 		_endpoint = ep
 
-	## 預設 local model 指向使用者家目錄的標準位置
-	var home: String = OS.get_environment("HOME")
-	_local_model = home + "/.local/share/doropet/whisper-models/ggml-base.bin"
+	_local_bin = default_local_bin()
+	_voice = default_voice()
+
+	## 預設 local model 路徑(跨平台)
+	if OS.get_name() == "Windows":
+		var profile: String = OS.get_environment("USERPROFILE")
+		_local_model = profile + "\\.local\\share\\doropet\\whisper-models\\ggml-base.bin"
+	else:
+		var home: String = OS.get_environment("HOME")
+		_local_model = home + "/.local/share/doropet/whisper-models/ggml-base.bin"
 
 	_http = HTTPRequest.new()
 	_http.timeout = 60.0
@@ -105,7 +123,7 @@ func set_endpoint(e: String) -> void: _endpoint = e if e.strip_edges() != "" els
 func get_endpoint() -> String: return _endpoint
 func set_model(m: String) -> void: _model = m if m.strip_edges() != "" else DEFAULT_STT_MODEL
 func get_model() -> String: return _model
-func set_local_bin(b: String) -> void: _local_bin = b if b.strip_edges() != "" else DEFAULT_LOCAL_BIN
+func set_local_bin(b: String) -> void: _local_bin = b if b.strip_edges() != "" else default_local_bin()
 func get_local_bin() -> String: return _local_bin
 func set_local_model(p: String) -> void: _local_model = p
 func get_local_model() -> String: return _local_model
@@ -369,27 +387,42 @@ func _on_stt_response(result: int, code: int, _h: PackedStringArray, body: Packe
 	DoroLogger.log("stt_response", {"engine": "api", "text": text, "latency_ms": lat})
 	transcribed.emit(text)
 
-## ---------- TTS (macOS say + Godot 內部播放 + spectrum lipsync) ----------
+## ---------- TTS (寫 WAV → Godot 內部播放 → spectrum lipsync) ----------
+## macOS:  /usr/bin/say
+## Windows: PowerShell System.Speech.Synthesis
 func speak(text: String) -> void:
 	if not _tts_enabled or text.strip_edges() == "":
 		return
-	if OS.get_name() != "macOS":
+	if OS.get_name() != "macOS" and OS.get_name() != "Windows":
 		return
 	stop_speaking()
-	## 在 thread 跑 say(避免 block 主執行緒)
 	var t: Thread = Thread.new()
 	t.start(_tts_thread.bind(text, _voice))
 
 func _tts_thread(text: String, voice: String) -> void:
 	var tmp: String = ProjectSettings.globalize_path(TMP_TTS_PATH)
-	var args: PackedStringArray = [
-		"-v", voice,
-		"-o", tmp,
-		"--file-format=WAVE",
-		"--data-format=LEI16@%d" % TTS_SR,
-		text,
-	]
-	OS.execute("/usr/bin/say", args, [], false)
+	if OS.get_name() == "macOS":
+		var args: PackedStringArray = [
+			"-v", voice,
+			"-o", tmp,
+			"--file-format=WAVE",
+			"--data-format=LEI16@%d" % TTS_SR,
+			text,
+		]
+		OS.execute("/usr/bin/say", args, [], false)
+	elif OS.get_name() == "Windows":
+		var ps_path: String = tmp.replace("/", "\\")
+		## 對單引號跟換行做最小 escape(text 內若含則破)
+		var safe_text: String = text.replace("'", "''").replace("`r", "").replace("\n", " ")
+		var script: String = (
+			"Add-Type -AssemblyName System.Speech;" +
+			"$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;" +
+			## 嘗試挑指定聲音,找不到就用預設
+			"try { $s.SelectVoice('%s') } catch {};" +
+			"$s.SetOutputToWaveFile('%s');" +
+			"$s.Speak('%s');" +
+			"$s.Dispose();") % [voice, ps_path, safe_text]
+		OS.execute("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], [], false)
 	call_deferred("_play_tts_file", tmp)
 
 func _play_tts_file(path: String) -> void:
@@ -441,8 +474,20 @@ func stop_speaking() -> void:
 	if _tts_player != null and _tts_player.playing:
 		_tts_player.stop()
 
-## 列出 macOS 上可用的中文 / 日文聲音（取常見的）
+## 跨平台 TTS 聲音建議名(直接顯示在設定下拉)
 static func suggested_voices() -> Array[String]:
+	if OS.get_name() == "Windows":
+		return [
+			"Microsoft Hanhan",      ## 台繁女
+			"Microsoft Yating",      ## 台繁女(新版)
+			"Microsoft Huihui",      ## 簡中女
+			"Microsoft Tracy",       ## 港粵女
+			"Microsoft Haruka",      ## 日文女
+			"Microsoft Ichiro",      ## 日文男
+			"Microsoft Zira",        ## 英文女
+			"Microsoft David",       ## 英文男
+		]
+	## macOS 預設
 	return [
 		"Mei-Jia",       ## 繁中女
 		"Sin-ji",        ## 粵語女
