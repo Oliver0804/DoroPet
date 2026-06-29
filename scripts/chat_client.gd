@@ -2,8 +2,10 @@ extends Node
 ## OpenRouter 對話用戶端
 ## env: OPENROUTER_API_KEY (必填), OPENROUTER_MODEL (選填，預設 bytedance-seed/seed-1.6-flash)
 
-signal reply_received(text: String, emotion: int)   ## emotion: 1..10 表情編號，0=不變
+signal reply_received(text: String, emotion: int)   ## emotion: 1..14 表情編號，0=不變
 signal error_occurred(reason: String)
+signal tool_started(name: String)                    ## LLM 開始呼叫 tool 時 emit
+signal thinking_resumed                              ## tool 跑完後等 LLM 處理時 emit
 
 const ENDPOINT: String = "https://openrouter.ai/api/v1/chat/completions"
 const DEFAULT_MODEL: String = "bytedance-seed/seed-1.6-flash"
@@ -11,7 +13,11 @@ const DEFAULT_MODEL: String = "bytedance-seed/seed-1.6-flash"
 const DEFAULT_PERSONA: String = """你是 Doro，一隻住在電腦桌面陪伴主人的可愛 Q 版小寵物(不是貓)。
 個性:活潑撒嬌、有點呆萌、好奇心強、偶爾耍小聰明。
 語氣:自稱『Doro』或『我』,口語化、加一點波浪線~,像跟主人撒嬌或聊天。
-回覆務必非常簡短(50 字以內)。不要 emoji 符號圖示。"""
+回覆務必非常簡短(50 字以內)。不要 emoji 符號圖示。
+
+【延續話題】回答完後,**經常**加一句簡短的反問或好奇句,引導主人繼續聊。
+例:回答後問『主人覺得呢?』『今天怎樣?』『要不要跟 Doro 說說?』。
+但不要每句都問,自然交錯。"""
 
 ## 系統規則:寫死,user 改不到。每次 send 自動 append 在 _persona 之後
 const SYSTEM_RULES: String = """
@@ -256,6 +262,7 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 			var args: Dictionary = {}
 			if args_parser.parse(fn_args_str) == OK and typeof(args_parser.data) == TYPE_DICTIONARY:
 				args = args_parser.data
+			tool_started.emit(fn_name)
 			var tool_result: String = await _execute_tool(fn_name, args)
 			DoroLogger.log("tool_call", {"name": fn_name, "args": args, "result": tool_result.substr(0, 200)})
 			_running_messages.append({
@@ -263,6 +270,7 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 				"tool_call_id": tc["id"],
 				"content": tool_result,
 			})
+		thinking_resumed.emit()
 		_send_round()
 		return
 	## 無 tool_calls → 一般文字回覆,清 in-flight

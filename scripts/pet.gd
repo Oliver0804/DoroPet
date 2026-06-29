@@ -113,6 +113,8 @@ var _bubble_label: Label
 var _bubble_timer: Timer
 var _input_window: Window                  ## 浮在 Doro 腳下的輸入框（獨立視窗）
 var _input_box: LineEdit
+var _input_idle_timer: Timer                ## 送出後保留輸入框 N 秒,過了沒動作再關
+const INPUT_IDLE_SEC: float = 5.0
 var _settings: Window                      ## SettingsDialog 實例
 var _last_input_voice: bool = false        ## 最近一次輸入是否來自語音（決定要不要朗讀回覆）
 var _last_mouse_pos: Vector2 = Vector2.ZERO
@@ -757,6 +759,8 @@ func _build_chat_ui() -> void:
 	add_child(_chat)
 	_chat.connect("reply_received", _on_chat_reply)
 	_chat.connect("error_occurred", _on_chat_error)
+	_chat.connect("tool_started", _on_chat_tool_started)
+	_chat.connect("thinking_resumed", _on_chat_thinking_resumed)
 
 	## 套用 config 中可能覆蓋 env 的設定
 	var cfg_key: String = _config_get("chat", "api_key", "")
@@ -838,10 +842,18 @@ func _build_chat_ui() -> void:
 	_input_window.add_child(_input_box)
 	add_child(_input_window)
 
+	## 輸入框送出後保留 5 秒等下一輪輸入
+	_input_idle_timer = Timer.new()
+	_input_idle_timer.one_shot = true
+	_input_idle_timer.timeout.connect(_close_input)
+	add_child(_input_idle_timer)
+
 func _open_input() -> void:
 	if not _chat.call("is_enabled"):
 		_show_bubble("(沒設 OPENROUTER_API_KEY 啦~)", 3.0)
 		return
+	if _input_idle_timer != null:
+		_input_idle_timer.stop()
 	_input_box.text = ""
 	var hotkey_str: String = hotkey_to_string(_hotkey_keycode, _hotkey_mods)
 	_input_box.placeholder_text = "🎙 聽你說... 再按 %s 結束 / Esc 取消 / 直接打字也行" % hotkey_str
@@ -947,27 +959,34 @@ func _platform_temp_dir() -> String:
 	return t2.rstrip("/")
 
 func _on_input_text_changed(_t: String) -> void:
-	## 使用者開始打字 → 中止錄音（避免 STT 結果覆蓋 user 輸入）
+	## 使用者開始打字 → 中止錄音 + 取消 idle 關閉倒數
 	if _voice != null and _voice.call("is_recording"):
 		_voice.call("abort_recording")
+	if _input_idle_timer != null:
+		_input_idle_timer.stop()
 
 func _on_submit(text: String) -> void:
 	var t: String = text.strip_edges()
 	if t == "":
 		_close_input()
 		return
-	_close_input()
+	## 不立刻關輸入框 — 清空 + 起 5 秒倒數,等下一輪
+	_input_box.text = ""
+	_input_box.grab_focus()
+	_start_input_idle_timer()
 	_last_input_voice = false
 	_begin_thinking()
 	var img: String = ""
 	if _wants_screenshot(t):
-		_show_bubble("📸 看一下螢幕…", 999.0)
+		_show_bubble("📸 Doro 在看畫面…", 999.0)
 		img = _grab_screenshot_b64()
-	if img != "":
-		_show_bubble("…(Doro 在看畫面)", 999.0)
-	else:
-		_show_bubble("…(Doro 想想)", 999.0)
+	_show_bubble("💭 Doro 正在想…", 999.0)
 	_chat.call("send", t, img)
+
+func _start_input_idle_timer() -> void:
+	if _input_idle_timer != null:
+		_input_idle_timer.stop()
+		_input_idle_timer.start(INPUT_IDLE_SEC)
 
 func _on_chat_reply(text: String, emotion: int) -> void:
 	_end_thinking()
@@ -1039,6 +1058,20 @@ func _on_chat_error(reason: String) -> void:
 	_end_thinking()
 	_show_bubble("(嗚… %s)" % reason, 4.0)
 
+func _on_chat_tool_started(name: String) -> void:
+	match name:
+		"take_screenshot":
+			_show_bubble("📸 Doro 在看畫面…", 999.0)
+		"get_weather":
+			_show_bubble("☁️ Doro 查天氣中…", 999.0)
+		"get_time":
+			_show_bubble("⏰ Doro 看一下時間…", 999.0)
+		_:
+			_show_bubble("⚙️ Doro 呼叫工具中…", 999.0)
+
+func _on_chat_thinking_resumed() -> void:
+	_show_bubble("💭 Doro 正在想…", 999.0)
+
 ## ---------- 語音 ----------
 func _toggle_voice() -> void:
 	if _voice == null:
@@ -1092,15 +1125,17 @@ func _on_recording_stopped() -> void:
 	_bubble_timer.stop()
 
 func _on_voice_transcribed(text: String) -> void:
-	## STT 完成 → 直接送，不等 user 按 Enter
-	if _input_box != null and _input_window.visible:
-		_close_input()
+	## STT 完成 → 直接送,但輸入框先保留(5s timer 等下一輪)
 	_last_input_voice = true
-	## _begin_thinking 已在錄音停止時呼叫,這裡先顯示 user 講的話
 	_show_bubble("「%s」" % text, 2.0)
-	## 短暫延遲後送 chat(讓使用者看到自己講了什麼)
+	## 短暫延遲讓 user 看到自己講了什麼
 	await get_tree().create_timer(0.3).timeout
+	_show_bubble("💭 Doro 正在想…", 999.0)
 	_chat.call("send", text)
+	## STT 成功送出 → 也開始 5 秒倒數,過了再關
+	if _input_box != null and _input_window.visible:
+		_input_box.text = ""
+		_start_input_idle_timer()
 
 func _on_voice_error(reason: String) -> void:
 	_end_thinking()
