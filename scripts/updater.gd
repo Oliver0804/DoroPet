@@ -3,10 +3,13 @@ extends Node
 ## 比對 project.godot 的 application/config/version 與 release tag(去掉 v 前綴)
 
 signal update_available(latest_tag: String, url: String)
+signal up_to_date
 
 const REPO: String = "Oliver0804/DoroPet"
 const API_URL: String = "https://api.github.com/repos/%s/releases/latest" % REPO
-const CURRENT_VERSION: String = "0.1.2"   ## 隨 release 走
+
+static func current_version() -> String:
+	return String(ProjectSettings.get_setting("application/config/version", "0.0.0"))
 
 var _http: HTTPRequest
 
@@ -36,8 +39,10 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 		return
 	var url: String = String(dict.get("html_url", "https://github.com/%s/releases/latest" % REPO))
 	var latest: String = tag.lstrip("v")
-	if _version_gt(latest, CURRENT_VERSION):
+	if _version_gt(latest, current_version()):
 		update_available.emit(tag, url)
+	else:
+		up_to_date.emit()
 
 ## 簡單版本比較:逐段 int 比(支援 a.b.c 不要 pre-release)
 static func _version_gt(a: String, b: String) -> bool:

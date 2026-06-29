@@ -104,13 +104,23 @@ func _setup_updater() -> void:
 	_updater.name = "Updater"
 	add_child(_updater)
 	_updater.update_available.connect(_on_update_available)
+	_updater.up_to_date.connect(_on_up_to_date)
 	## 啟動延遲 5 秒查更新,避免影響開啟速度
 	await get_tree().create_timer(5.0).timeout
 	_updater.call("check")
 
 func _on_update_available(latest_tag: String, url: String) -> void:
 	_update_url = url
-	_show_bubble("🎉 有新版 %s,右鍵選『下載新版』" % latest_tag, 10.0)
+	_show_bubble("🎉 新版 %s 可用!右鍵 → 下載新版" % latest_tag, 10.0)
+	## 把 menu 項目改顯眼
+	var idx: int = _menu.get_item_index(41)
+	if idx >= 0:
+		_menu.set_item_text(idx, "⬇ 下載新版 %s" % latest_tag)
+
+func _on_up_to_date() -> void:
+	var idx: int = _menu.get_item_index(41)
+	if idx >= 0:
+		_menu.set_item_text(idx, "✓ 已是最新版 (v%s)" % Updater.current_version())
 
 func _setup_auto_emotion() -> void:
 	_auto_emo_timer = Timer.new()
@@ -234,7 +244,7 @@ func _build_menu() -> void:
 	_menu.add_item("重設大小", 22)
 	_menu.add_separator()
 	_menu.add_item("設定…", 40)
-	_menu.add_item("檢查更新", 41)
+	_menu.add_item("檢查更新 (v%s)" % Updater.current_version(), 41)
 	_menu.add_separator()
 	_menu.add_item("結束", 99)
 	_menu.id_pressed.connect(_on_menu)
@@ -268,7 +278,7 @@ func _on_menu(id: int) -> void:
 			if _update_url != "":
 				OS.shell_open(_update_url)
 			else:
-				_show_bubble("檢查更新中…", 2.0)
+				_show_bubble("檢查更新中…(目前 v%s)" % Updater.current_version(), 2.0)
 				_updater.call("check")
 		99:
 			get_tree().quit()

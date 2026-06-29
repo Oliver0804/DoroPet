@@ -64,7 +64,8 @@ var _vad_threshold_label: Label
 var _vad_silence_spin: SpinBox
 
 func _init() -> void:
-	title = "Doro 設定"
+	var v: String = String(ProjectSettings.get_setting("application/config/version", "0.0.0"))
+	title = "Doro 設定 — v" + v
 	size = Vector2i(560, 680)
 	min_size = Vector2i(460, 360)
 	transient = false
