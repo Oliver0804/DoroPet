@@ -7,6 +7,8 @@ signal logs_requested
 ## 由 pet.gd 在 open() 時帶入當前值
 var _initial: Dictionary = {}
 
+var _model_path_edit: LineEdit
+var _model_path_btn: Button
 var _scale_slider: HSlider
 var _scale_label: Label
 var _head_slider: HSlider
@@ -16,8 +18,23 @@ var _ontop_check: CheckBox
 var _gaze_check: CheckBox
 var _api_key: LineEdit
 var _model_edit: LineEdit
+var _model_preset: OptionButton
 var _persona_edit: TextEdit
 var _model_status: Label
+
+## OpenRouter 常用 model 預設(依用途分組)
+const MODEL_PRESETS: Array = [
+	{"label": "—— 自訂 ——", "value": ""},
+	{"label": "ByteDance Seed 2.0 mini(預設・支援視覺)", "value": "bytedance-seed/seed-2.0-mini"},
+	{"label": "ByteDance Seed 1.6 Flash", "value": "bytedance-seed/seed-1.6-flash"},
+	{"label": "Gemini 2.5 Flash(免費・支援視覺)", "value": "google/gemini-2.5-flash-image-preview:free"},
+	{"label": "Gemini 2.0 Flash Exp(免費・支援視覺)", "value": "google/gemini-2.0-flash-exp:free"},
+	{"label": "DeepSeek Chat v3.1(免費・純文字)", "value": "deepseek/deepseek-chat-v3.1:free"},
+	{"label": "Llama 3.3 70B(免費・純文字)", "value": "meta-llama/llama-3.3-70b-instruct:free"},
+	{"label": "Qwen 2.5 72B(免費・純文字)", "value": "qwen/qwen-2.5-72b-instruct:free"},
+	{"label": "Claude 3.5 Haiku(付費・很穩)", "value": "anthropic/claude-3.5-haiku"},
+	{"label": "GPT-4o mini(付費・支援視覺)", "value": "openai/gpt-4o-mini"},
+]
 
 ## 語音
 var _voice_engine: OptionButton
@@ -61,6 +78,7 @@ func _ready() -> void:
 
 func open(initial: Dictionary, chat_status: String, voice_status: String = "") -> void:
 	_initial = initial.duplicate()
+	_model_path_edit.text = initial.get("model_path", "res://assets/doro/Doro.model3.json")
 	_scale_slider.value = initial.get("scale", 0.25)
 	_head_slider.value = initial.get("head", 30.0)
 	_eye_slider.value = initial.get("eye", 1.0)
@@ -68,7 +86,8 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 	_ontop_check.button_pressed = initial.get("always_on_top", true)
 	_gaze_check.button_pressed = initial.get("gaze_follow", true)
 	_api_key.text = initial.get("api_key", "")
-	_model_edit.text = initial.get("model", "bytedance-seed/seed-1.6-flash")
+	_model_edit.text = initial.get("model", "bytedance-seed/seed-2.0-mini")
+	_sync_model_preset()
 	_persona_edit.text = initial.get("persona", "")
 	_model_status.text = "OpenRouter: " + chat_status
 	_voice_api_key.text = initial.get("voice_api_key", "")
@@ -121,6 +140,24 @@ func _build_ui() -> void:
 	scroll.add_child(vb)
 
 	vb.add_child(_section("外觀"))
+
+	## Live2D 模型路徑
+	var mp_row: HBoxContainer = HBoxContainer.new()
+	var mp_cap: Label = Label.new()
+	mp_cap.text = "模型"
+	mp_cap.custom_minimum_size = Vector2(80, 0)
+	_model_path_edit = LineEdit.new()
+	_model_path_edit.placeholder_text = "res:// 路徑或絕對路徑 (.model3.json)"
+	_model_path_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_model_path_edit.text_changed.connect(_on_text_changed)
+	_model_path_btn = Button.new()
+	_model_path_btn.text = "📂"
+	_model_path_btn.tooltip_text = "選一個 .model3.json"
+	_model_path_btn.pressed.connect(_on_model_path_pick)
+	mp_row.add_child(mp_cap)
+	mp_row.add_child(_model_path_edit)
+	mp_row.add_child(_model_path_btn)
+	vb.add_child(mp_row)
 
 	## 縮放滑桿
 	var scale_row: HBoxContainer = HBoxContainer.new()
@@ -247,14 +284,29 @@ func _build_ui() -> void:
 	key_row.add_child(_api_key)
 	vb.add_child(key_row)
 
+	## Model 預設下拉
+	var preset_row: HBoxContainer = HBoxContainer.new()
+	var preset_cap: Label = Label.new()
+	preset_cap.text = "預設"
+	preset_cap.custom_minimum_size = Vector2(80, 0)
+	_model_preset = OptionButton.new()
+	_model_preset.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	for p in MODEL_PRESETS:
+		_model_preset.add_item(p.label)
+	_model_preset.item_selected.connect(_on_model_preset_selected)
+	preset_row.add_child(preset_cap)
+	preset_row.add_child(_model_preset)
+	vb.add_child(preset_row)
+
+	## 自訂 Model ID
 	var model_row: HBoxContainer = HBoxContainer.new()
 	var model_cap: Label = Label.new()
-	model_cap.text = "Model"
+	model_cap.text = "Model ID"
 	model_cap.custom_minimum_size = Vector2(80, 0)
 	_model_edit = LineEdit.new()
-	_model_edit.placeholder_text = "bytedance-seed/seed-1.6-flash"
+	_model_edit.placeholder_text = "bytedance-seed/seed-2.0-mini"
 	_model_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	_model_edit.text_changed.connect(_on_text_changed)
+	_model_edit.text_changed.connect(_on_model_text_changed)
 	model_row.add_child(model_cap)
 	model_row.add_child(_model_edit)
 	vb.add_child(model_row)
@@ -467,6 +519,33 @@ func _on_any_toggled(_b: bool) -> void:
 func _on_text_changed(_s: String) -> void:
 	_emit()
 
+func _on_model_text_changed(s: String) -> void:
+	## 使用者手動改文字 → 下拉切到「自訂」(除非剛好對到某預設)
+	var matched_idx: int = 0
+	for i in MODEL_PRESETS.size():
+		if MODEL_PRESETS[i].value == s and MODEL_PRESETS[i].value != "":
+			matched_idx = i
+			break
+	if _model_preset.selected != matched_idx:
+		_model_preset.select(matched_idx)
+	_emit()
+
+func _on_model_preset_selected(idx: int) -> void:
+	var v: String = MODEL_PRESETS[idx].value
+	if v != "":
+		_model_edit.text = v
+	_emit()
+
+func _sync_model_preset() -> void:
+	## open() 時依當前 model 文字選擇對應下拉
+	if _model_preset == null:
+		return
+	for i in MODEL_PRESETS.size():
+		if MODEL_PRESETS[i].value == _model_edit.text and MODEL_PRESETS[i].value != "":
+			_model_preset.select(i)
+			return
+	_model_preset.select(0)
+
 func _on_persona_changed() -> void:
 	_emit()
 
@@ -478,6 +557,7 @@ func _collect() -> Dictionary:
 	if _tts_voice.selected >= 0:
 		tts_v = _tts_voice.get_item_text(_tts_voice.selected)
 	return {
+		"model_path": _model_path_edit.text,
 		"scale": _scale_slider.value,
 		"head": _head_slider.value,
 		"eye": _eye_slider.value,
@@ -511,6 +591,21 @@ func _reset_defaults() -> void:
 	_gaze_check.button_pressed = true
 	_model_edit.text = "bytedance-seed/seed-1.6-flash"
 	## persona/api_key 不動，避免誤刪
+
+func _on_model_path_pick() -> void:
+	var fd: FileDialog = FileDialog.new()
+	fd.access = FileDialog.ACCESS_FILESYSTEM
+	fd.file_mode = FileDialog.FILE_MODE_OPEN_FILE
+	fd.filters = PackedStringArray(["*.model3.json ; Live2D Model"])
+	fd.size = Vector2i(720, 480)
+	fd.use_native_dialog = true
+	add_child(fd)
+	fd.file_selected.connect(func(p: String) -> void:
+		_model_path_edit.text = p
+		_emit()
+		fd.queue_free())
+	fd.canceled.connect(func() -> void: fd.queue_free())
+	fd.popup_centered()
 
 func _on_close() -> void:
 	## 關閉前停掉測試

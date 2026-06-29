@@ -50,9 +50,13 @@ func _ready() -> void:
 	_refresh_btn.pressed.connect(_refresh_files)
 	tool.add_child(_refresh_btn)
 	_open_dir_btn = Button.new()
-	_open_dir_btn.text = "📂 開啟 log 資料夾"
+	_open_dir_btn.text = "📂 開啟資料夾"
 	_open_dir_btn.pressed.connect(func() -> void: OS.shell_open(DoroLogger.get_log_dir_abs()))
 	tool.add_child(_open_dir_btn)
+	var export_btn: Button = Button.new()
+	export_btn.text = "📝 匯出 .md"
+	export_btn.pressed.connect(_export_md)
+	tool.add_child(export_btn)
 	v.add_child(tool)
 
 	## 左右分割
@@ -110,6 +114,51 @@ func _refresh_entries() -> void:
 		_entries.text = "[i](沒有符合的記錄)[/i]"
 	else:
 		_entries.text = "\n".join(lines)
+
+func _export_md() -> void:
+	if _current_file == "":
+		return
+	var rows: Array = DoroLogger.read_log(_current_file, 9999)
+	rows.reverse()  ## 由舊到新更易讀
+	var date_str: String = _current_file.get_file().trim_suffix(".jsonl")
+	var lines: PackedStringArray = []
+	lines.append("# Doro 對話記錄 — %s" % date_str)
+	lines.append("")
+	for r in rows:
+		var t: String = r.get("type", "")
+		var ts: String = r.get("ts", "")
+		match t:
+			"chat_request":
+				var img: bool = r.get("has_image", false)
+				lines.append("### 🙋 [%s] 我問:%s" % [ts, ("📸 " if img else "")])
+				lines.append("> %s" % String(r.get("text", "")))
+				lines.append("")
+			"chat_response":
+				var emo: int = int(r.get("emotion", 0))
+				var emo_str: String = (" — 情緒 %d" % emo) if emo > 0 else ""
+				var ms: int = int(r.get("latency_ms", 0))
+				lines.append("### 🐱 Doro 回覆%s _(%dms)_" % [emo_str, ms])
+				lines.append("> %s" % String(r.get("text", "")))
+				lines.append("")
+			"chat_error":
+				lines.append("> ❌ 錯誤:%s" % r.get("reason", ""))
+				lines.append("")
+			"stt_request":
+				var s: float = float(r.get("audio_sec", 0.0))
+				lines.append("- 🎙 STT 開始(引擎 %s,%.1fs 音訊)" % [r.get("engine", "?"), s])
+			"stt_response":
+				lines.append("  - 辨識:「%s」" % r.get("text", ""))
+			"stt_error":
+				lines.append("  - 辨識失敗:%s" % r.get("reason", ""))
+	var path: String = "%s/conversation-%s.md" % [DoroLogger.get_log_dir_abs(), date_str]
+	var f: FileAccess = FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		_entries.text = "[color=red]無法寫入 %s[/color]" % path
+		return
+	f.store_string("\n".join(lines))
+	f.close()
+	_entries.text = "[color=#3aa05a]✅ 匯出至:[/color]\n%s" % path
+	OS.shell_open(DoroLogger.get_log_dir_abs())
 
 func _format_entry(e: Dictionary) -> String:
 	var ts: String = e.get("ts", "")

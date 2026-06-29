@@ -63,7 +63,10 @@ const ChatClient := preload("res://scripts/chat_client.gd")
 const SettingsDialog := preload("res://scripts/settings_dialog.gd")
 const VoiceClient := preload("res://scripts/voice_client.gd")
 const LogsViewer := preload("res://scripts/logs_viewer.gd")
+const Updater := preload("res://scripts/updater.gd")
 var _logs_viewer: Window
+var _updater: Node
+var _update_url: String = ""
 var _chat: Node                            ## ChatClient 實例
 var _voice: Node                           ## VoiceClient 實例
 var _bubble_window: Window                 ## 浮在 Doro 頭頂的對話氣泡（獨立視窗）
@@ -94,6 +97,20 @@ func _ready() -> void:
 	_build_chat_ui()
 	get_window().always_on_top = _always_on_top
 	_setup_auto_emotion()
+	_setup_updater()
+
+func _setup_updater() -> void:
+	_updater = Updater.new()
+	_updater.name = "Updater"
+	add_child(_updater)
+	_updater.update_available.connect(_on_update_available)
+	## 啟動延遲 5 秒查更新,避免影響開啟速度
+	await get_tree().create_timer(5.0).timeout
+	_updater.call("check")
+
+func _on_update_available(latest_tag: String, url: String) -> void:
+	_update_url = url
+	_show_bubble("🎉 有新版 %s,右鍵選『下載新版』" % latest_tag, 10.0)
 
 func _setup_auto_emotion() -> void:
 	_auto_emo_timer = Timer.new()
@@ -139,6 +156,19 @@ func _load_model() -> void:
 	model.set("assets", model_path)
 	_apply_scale()
 	add_child(model)
+
+func _reload_model(new_path: String) -> void:
+	if new_path == "" or new_path == model_path:
+		return
+	model_path = new_path
+	if model != null:
+		model.queue_free()
+		model = null
+	_expression_ids.clear()
+	_expression_index = 0
+	_load_model()
+	_collect_expressions()
+	_show_bubble("已切換模型:%s" % new_path.get_file(), 3.0)
 
 ## 主視窗尺寸隨 model_scale 動態貼合 Doro
 ## 實測 Doro 在 anchor=0.5 下，寬比高大(Q 版頭大)
@@ -204,6 +234,7 @@ func _build_menu() -> void:
 	_menu.add_item("重設大小", 22)
 	_menu.add_separator()
 	_menu.add_item("設定…", 40)
+	_menu.add_item("檢查更新", 41)
 	_menu.add_separator()
 	_menu.add_item("結束", 99)
 	_menu.id_pressed.connect(_on_menu)
@@ -233,6 +264,12 @@ func _on_menu(id: int) -> void:
 				_show_bubble("(對話清空了 ~)", 2.5)
 		40:
 			_open_settings()
+		41:
+			if _update_url != "":
+				OS.shell_open(_update_url)
+			else:
+				_show_bubble("檢查更新中…", 2.0)
+				_updater.call("check")
 		99:
 			get_tree().quit()
 
@@ -764,6 +801,7 @@ func _open_settings() -> void:
 	## 把 voice node 注入,讓 dialog 自己列裝置 / 跑測試 / 顯示 RMS
 	_settings.call("set_voice_node", _voice)
 	var data: Dictionary = {
+		"model_path": model_path,
 		"scale": model_scale,
 		"head": head_follow_strength,
 		"eye": eye_follow_strength,
@@ -797,6 +835,9 @@ func _open_logs() -> void:
 
 func _on_settings_changed(data: Dictionary) -> void:
 	## 即時套用 + 寫 config
+	var new_model_path: String = String(data.get("model_path", model_path))
+	if new_model_path != "" and new_model_path != model_path:
+		_reload_model(new_model_path)
 	model_scale = clamp(float(data.get("scale", model_scale)), SCALE_MIN, SCALE_MAX)
 	head_follow_strength = float(data.get("head", head_follow_strength))
 	eye_follow_strength = float(data.get("eye", eye_follow_strength))
@@ -836,6 +877,7 @@ func _load_config() -> void:
 	var cfg: ConfigFile = ConfigFile.new()
 	if cfg.load(CONFIG_PATH) != OK:
 		return
+	model_path = cfg.get_value("pet", "model_path", model_path)
 	model_scale = clamp(cfg.get_value("pet", "scale", model_scale), SCALE_MIN, SCALE_MAX)
 	model_y_anchor = cfg.get_value("pet", "y_anchor", model_y_anchor)
 	head_follow_strength = cfg.get_value("pet", "head", head_follow_strength)
@@ -853,6 +895,7 @@ func _save_config() -> void:
 	var cfg: ConfigFile = ConfigFile.new()
 	## 載入既有再覆寫，保留 chat 段
 	cfg.load(CONFIG_PATH)
+	cfg.set_value("pet", "model_path", model_path)
 	cfg.set_value("pet", "scale", model_scale)
 	cfg.set_value("pet", "y_anchor", model_y_anchor)
 	cfg.set_value("pet", "head", head_follow_strength)
