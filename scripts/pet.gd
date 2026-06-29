@@ -90,6 +90,14 @@ const GAZE_LERP_SPEED: float = 6.0         ## 越大越快、越小越慢
 var _smooth_mouth: float = 0.0
 const MOUTH_LERP_SPEED: float = 20.0       ## 嘴巴 LERP 要快，才能跟上聲音
 
+## 眨眼 / 挑眉(idle 期間隨機 trigger)
+var _blink_t: float = 3.5                  ## 距離下一次眨眼倒數
+var _blink_anim_t: float = -1.0            ## 正在播眨眼動畫的時間(>=0 時 active)
+const BLINK_DURATION: float = 0.18         ## 一次眨眼總時長
+var _brow_t: float = 12.0
+var _brow_anim_t: float = -1.0
+const BROW_DURATION: float = 0.6           ## 挑眉動畫時長
+
 func _ready() -> void:
 	_load_config()
 	model_y_anchor = 0.5     ## 一次性覆蓋舊 config 的 0.55，確保 Doro 置中
@@ -389,6 +397,60 @@ func _process(dt: float) -> void:
 	var mk: float = clamp(dt * MOUTH_LERP_SPEED, 0.0, 1.0)
 	_smooth_mouth = lerp(_smooth_mouth, target_mouth, mk)
 	_set_param("ParamMouthOpenY", _smooth_mouth)
+
+	## --- 眨眼 ---
+	_update_blink(dt)
+	## --- 挑眉(隨機,較不頻繁)---
+	_update_brow(dt)
+
+func _update_blink(dt: float) -> void:
+	if _thinking:
+		return
+	if _blink_anim_t >= 0.0:
+		_blink_anim_t += dt
+		if _blink_anim_t >= BLINK_DURATION:
+			_blink_anim_t = -1.0
+			_set_param("ParamEyeLOpen", 1.0)
+			_set_param("ParamEyeROpen", 1.0)
+			_schedule_next_blink()
+		else:
+			## 三角形:0→1→0 對應 open→close→open
+			var t: float = _blink_anim_t / BLINK_DURATION
+			var openv: float = (1.0 - abs(t * 2.0 - 1.0))   ## 0..1..0
+			var eye: float = 1.0 - openv                     ## 1=睜, 0=閉
+			_set_param("ParamEyeLOpen", eye)
+			_set_param("ParamEyeROpen", eye)
+	else:
+		_blink_t -= dt
+		if _blink_t <= 0.0:
+			_blink_anim_t = 0.0
+
+func _schedule_next_blink() -> void:
+	_blink_t = randf_range(2.0, 5.0)   ## 平均每 3.5 秒眨一次,人類正常頻率
+
+func _update_brow(dt: float) -> void:
+	if _thinking:
+		return
+	if _brow_anim_t >= 0.0:
+		_brow_anim_t += dt
+		if _brow_anim_t >= BROW_DURATION:
+			_brow_anim_t = -1.0
+			_set_param("ParamBrowLY", 0.0)
+			_set_param("ParamBrowRY", 0.0)
+			_schedule_next_brow()
+		else:
+			## sin 曲線:平滑上下
+			var t: float = _brow_anim_t / BROW_DURATION
+			var v: float = sin(t * PI) * 0.6   ## 0→0.6→0
+			_set_param("ParamBrowLY", v)
+			_set_param("ParamBrowRY", v)
+	else:
+		_brow_t -= dt
+		if _brow_t <= 0.0:
+			_brow_anim_t = 0.0
+
+func _schedule_next_brow() -> void:
+	_brow_t = randf_range(8.0, 20.0)   ## 8-20 秒挑一次眉,自然但不頻繁
 
 func _set_param(id: String, value: float) -> void:
 	if model == null:
