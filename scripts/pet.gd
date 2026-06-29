@@ -50,6 +50,8 @@ var _vad_threshold: float = 0.02           ## RMS 門檻：> 視為有聲
 var _vad_silence_sec: float = 1.2          ## 持續沉默幾秒 → 自動送出
 var _vad_has_spoken: bool = false          ## 本次錄音內是否說過話
 var _vad_silence_t: float = 0.0
+## 反鋸齒(0=關, 1=2x, 2=4x, 3=8x;對應 Viewport.MSAA_*)
+var _msaa: int = 2
 ## 隨機自動表情
 const AUTO_EMO_MIN_SEC: float = 60.0       ## 1 分鐘
 const AUTO_EMO_MAX_SEC: float = 300.0      ## 5 分鐘
@@ -96,8 +98,15 @@ func _ready() -> void:
 	_build_menu()
 	_build_chat_ui()
 	get_window().always_on_top = _always_on_top
+	_apply_msaa()
 	_setup_auto_emotion()
 	_setup_updater()
+
+func _apply_msaa() -> void:
+	var v: Viewport = get_viewport()
+	if v == null:
+		return
+	v.msaa_2d = clamp(_msaa, 0, 3) as Viewport.MSAA
 
 func _setup_updater() -> void:
 	_updater = Updater.new()
@@ -834,6 +843,7 @@ func _open_settings() -> void:
 		"vad_enabled": _vad_enabled,
 		"vad_threshold": _vad_threshold,
 		"vad_silence_sec": _vad_silence_sec,
+		"msaa": _msaa,
 	}
 	_settings.open(data, _chat.call("get_status"), _voice.call("stt_status") if _voice else "")
 
@@ -859,6 +869,10 @@ func _on_settings_changed(data: Dictionary) -> void:
 	_vad_enabled = bool(data.get("vad_enabled", _vad_enabled))
 	_vad_threshold = float(data.get("vad_threshold", _vad_threshold))
 	_vad_silence_sec = float(data.get("vad_silence_sec", _vad_silence_sec))
+	var new_msaa: int = int(data.get("msaa", _msaa))
+	if new_msaa != _msaa:
+		_msaa = new_msaa
+		_apply_msaa()
 	_apply_scale()
 	get_window().always_on_top = _always_on_top
 	if _chat:
@@ -900,6 +914,7 @@ func _load_config() -> void:
 	_vad_enabled = bool(cfg.get_value("pet", "vad_enabled", _vad_enabled))
 	_vad_threshold = float(cfg.get_value("pet", "vad_threshold", _vad_threshold))
 	_vad_silence_sec = float(cfg.get_value("pet", "vad_silence_sec", _vad_silence_sec))
+	_msaa = int(cfg.get_value("pet", "msaa", _msaa))
 
 func _save_config() -> void:
 	var cfg: ConfigFile = ConfigFile.new()
@@ -918,6 +933,7 @@ func _save_config() -> void:
 	cfg.set_value("pet", "vad_enabled", _vad_enabled)
 	cfg.set_value("pet", "vad_threshold", _vad_threshold)
 	cfg.set_value("pet", "vad_silence_sec", _vad_silence_sec)
+	cfg.set_value("pet", "msaa", _msaa)
 	if _chat:
 		cfg.set_value("chat", "api_key", _chat.call("get_api_key"))
 		cfg.set_value("chat", "model", _chat.call("get_model"))

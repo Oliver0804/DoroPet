@@ -7,7 +7,7 @@ config_version=5
 
 config/name="DoroPet"
 config/description="Doro 桌面寵物 (Live2D)"
-config/version="0.1.3"
+config/version="0.1.4"
 run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.4", "Forward Plus")
 config/icon="res://assets/doro/icon.png"
@@ -33,6 +33,8 @@ driver/enable_input=true
 renderer/rendering_method="gl_compatibility"
 renderer/rendering_method.mobile="gl_compatibility"
 viewport/transparent_background=true
+anti_aliasing/quality/msaa_2d=2
+textures/default_filters/anisotropic_filtering_level=4
 environment/defaults/default_clear_color=Color(0, 0, 0, 0)
 
 [editor_plugins]

@@ -9,6 +9,7 @@ var _initial: Dictionary = {}
 
 var _model_path_edit: LineEdit
 var _model_path_btn: Button
+var _msaa_select: OptionButton
 var _scale_slider: HSlider
 var _scale_label: Label
 var _head_slider: HSlider
@@ -86,6 +87,7 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 	_bubble_spin.value = initial.get("bubble_seconds", 8.0)
 	_ontop_check.button_pressed = initial.get("always_on_top", true)
 	_gaze_check.button_pressed = initial.get("gaze_follow", true)
+	_msaa_select.select(clamp(int(initial.get("msaa", 2)), 0, 3))
 	_api_key.text = initial.get("api_key", "")
 	_model_edit.text = initial.get("model", "bytedance-seed/seed-2.0-mini")
 	_sync_model_preset()
@@ -193,6 +195,22 @@ func _build_ui() -> void:
 	_ontop_check.text = "永遠置頂"
 	_ontop_check.toggled.connect(_on_any_toggled)
 	vb.add_child(_ontop_check)
+
+	## MSAA 反鋸齒
+	var msaa_row: HBoxContainer = HBoxContainer.new()
+	var msaa_cap: Label = Label.new()
+	msaa_cap.text = "反鋸齒"
+	msaa_cap.custom_minimum_size = Vector2(80, 0)
+	_msaa_select = OptionButton.new()
+	_msaa_select.add_item("關")          ## 0
+	_msaa_select.add_item("2x")          ## 1
+	_msaa_select.add_item("4x (建議)")    ## 2
+	_msaa_select.add_item("8x")          ## 3
+	_msaa_select.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_msaa_select.item_selected.connect(func(_i: int) -> void: _emit())
+	msaa_row.add_child(msaa_cap)
+	msaa_row.add_child(_msaa_select)
+	vb.add_child(msaa_row)
 
 	## 對話氣泡停留
 	var bubble_row: HBoxContainer = HBoxContainer.new()
@@ -565,6 +583,7 @@ func _collect() -> Dictionary:
 		"bubble_seconds": _bubble_spin.value,
 		"always_on_top": _ontop_check.button_pressed,
 		"gaze_follow": _gaze_check.button_pressed,
+		"msaa": _msaa_select.selected,
 		"api_key": _api_key.text,
 		"model": _model_edit.text,
 		"persona": _persona_edit.text,
