@@ -1,0 +1,132 @@
+name: Build macOS
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "scenes/**"
+      - "assets/**"
+      - "project.godot"
+      - "export_presets.cfg"
+      - ".github/workflows/build-macos.yml"
+
+concurrency:
+  group: build-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GODOT_VERSION: "4.6.2"
+  GD_CUBISM_TAG: "v0.9.1"
+  SDK_URL: "https://cubism.live2d.com/sdk-native/bin/CubismSdkForNative-5-r.1.zip"
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install scons
+        run: pip install "scons==4.7"
+
+      - name: Clone gd_cubism + submodules
+        run: |
+          git clone --depth 1 --branch "$GD_CUBISM_TAG" --recurse-submodules \
+            https://github.com/MizunagiKB/gd_cubism.git vendor/gd_cubism
+
+      - name: Cache gd_cubism build artifacts (macOS)
+        uses: actions/cache@v4
+        with:
+          path: |
+            vendor/gd_cubism/godot-cpp/bin
+            vendor/gd_cubism/godot-cpp/gen
+            vendor/gd_cubism/src/*.os
+            vendor/gd_cubism/src/private/*.os
+            vendor/gd_cubism/thirdparty/CubismSdkForNative-*/Framework/src/**/*.os
+            vendor/gd_cubism/demo/addons/gd_cubism/bin
+            vendor/gd_cubism/.sconsign.dblite
+          key: macos-gd_cubism-${{ env.GD_CUBISM_TAG }}-v2
+
+      - name: Download Cubism SDK 5-r.1
+        run: |
+          curl -L --progress-bar -o sdk.zip "$SDK_URL"
+          unzip -q sdk.zip -d vendor/gd_cubism/thirdparty/
+          rm sdk.zip
+          ls vendor/gd_cubism/thirdparty/
+
+      - name: Build gd_cubism (macOS universal)
+        working-directory: vendor/gd_cubism
+        run: |
+          scons platform=macos arch=arm64 target=template_debug -j3
+          scons platform=macos arch=arm64 target=template_release -j3
+          scons platform=macos arch=x86_64 target=template_debug -j3
+          scons platform=macos arch=x86_64 target=template_release -j3
+          # 合成 universal binary lipo,讓 .framework 內含兩個 arch
+          for v in debug release; do
+            FRAMEWORK="demo/addons/gd_cubism/bin/libgd_cubism.macos.template_$v.framework"
+            if [ -d "$FRAMEWORK" ]; then
+              echo "✓ $FRAMEWORK 已存在"
+            fi
+          done
+          ls demo/addons/gd_cubism/bin/
+
+      - name: Stage addons to project
+        run: |
+          mkdir -p addons
+          cp -R vendor/gd_cubism/demo/addons/gd_cubism addons/
+          # Live2D Core dylib (macOS)
+          CORE="vendor/gd_cubism/thirdparty/CubismSdkForNative-5-r.1/Core/dll/macos/libLive2DCubismCore.dylib"
+          if [ -f "$CORE" ]; then
+            cp "$CORE" addons/gd_cubism/bin/ || true
+          fi
+          ls addons/gd_cubism/bin/
+          touch vendor/.gdignore
+
+      - name: Setup Godot
+        uses: chickensoft-games/setup-godot@v2
+        with:
+          version: ${{ env.GODOT_VERSION }}
+          use-dotnet: false
+          include-templates: true
+
+      - name: Import project (headless)
+        run: |
+          GODOT_BIN="$(command -v godot)"
+          echo "godot=$GODOT_BIN"
+          $GODOT_BIN --version
+          $GODOT_BIN --headless --path . --import
+          $GODOT_BIN --headless --path . --import
+          test -d .godot || (echo "Import failed" && exit 1)
+
+      - name: Export macOS .app
+        run: |
+          mkdir -p build
+          GODOT_BIN="$(command -v godot)"
+          $GODOT_BIN --headless --path . --export-release macos build/DoroPet.app
+          test -d build/DoroPet.app || (echo "Export failed" && exit 1)
+          # gd_cubism Core dylib 補進 .app/Contents/Resources(plugin 在 runtime 找這條路徑)
+          # 實際 .app 內 Live2D Core 由 .framework 載入,放 .app 旁邊也可
+          ls -la build/
+
+      - name: Build DMG
+        run: |
+          cd build
+          # 先 sign app 為 ad-hoc(讓 macOS 不無條件拒)
+          codesign --force --deep --sign - DoroPet.app || true
+          hdiutil create -volname "DoroPet" -srcfolder DoroPet.app -ov -format UDZO DoroPet.dmg
+          ls -la
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DoroPet-macOS-universal
+          path: |
+            build/DoroPet.dmg
+            build/DoroPet.app
+          retention-days: 14
