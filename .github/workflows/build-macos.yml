@@ -51,7 +51,7 @@ jobs:
             vendor/gd_cubism/thirdparty/CubismSdkForNative-*/Framework/src/**/*.os
             vendor/gd_cubism/demo/addons/gd_cubism/bin
             vendor/gd_cubism/.sconsign.dblite
-          key: macos-gd_cubism-${{ env.GD_CUBISM_TAG }}-v2
+          key: macos-arm64-gd_cubism-${{ env.GD_CUBISM_TAG }}-v3
 
       - name: Download Cubism SDK 5-r.1
         run: |
@@ -60,21 +60,13 @@ jobs:
           rm sdk.zip
           ls vendor/gd_cubism/thirdparty/
 
-      - name: Build gd_cubism (macOS universal)
+      - name: Build gd_cubism (macOS arm64)
         working-directory: vendor/gd_cubism
         run: |
           scons platform=macos arch=arm64 target=template_debug -j3
           scons platform=macos arch=arm64 target=template_release -j3
-          scons platform=macos arch=x86_64 target=template_debug -j3
-          scons platform=macos arch=x86_64 target=template_release -j3
-          # 合成 universal binary lipo,讓 .framework 內含兩個 arch
-          for v in debug release; do
-            FRAMEWORK="demo/addons/gd_cubism/bin/libgd_cubism.macos.template_$v.framework"
-            if [ -d "$FRAMEWORK" ]; then
-              echo "✓ $FRAMEWORK 已存在"
-            fi
-          done
-          ls demo/addons/gd_cubism/bin/
+          ls -la demo/addons/gd_cubism/bin/
+          file demo/addons/gd_cubism/bin/libgd_cubism.macos.template_release.framework/* || true
 
       - name: Stage addons to project
         run: |
