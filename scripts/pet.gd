@@ -94,6 +94,11 @@ var _logs_viewer: Window
 var _updater: Node
 var _update_url: String = ""
 var _auto_check_updates: bool = true
+
+## 系統匣 / menu bar 圖示
+var _tray_id: int = -1
+var _tray_menu: PopupMenu
+var _hidden: bool = false
 var _chat: Node                            ## ChatClient 實例
 var _voice: Node                           ## VoiceClient 實例
 var _bubble_window: Window                 ## 浮在 Doro 頭頂的對話氣泡（獨立視窗）
@@ -134,6 +139,73 @@ func _ready() -> void:
 	_apply_msaa()
 	_setup_auto_emotion()
 	_setup_updater()
+	_setup_tray()
+
+## ---------- 系統匣 / menu bar ----------
+func _setup_tray() -> void:
+	if not DisplayServer.has_feature(DisplayServer.FEATURE_STATUS_INDICATOR):
+		return
+	## tray 專用 PopupMenu
+	_tray_menu = PopupMenu.new()
+	_tray_menu.add_item("顯示 / 隱藏", 200)
+	_tray_menu.add_item("跟 Doro 對話", 201)
+	_tray_menu.add_separator()
+	_tray_menu.add_item("檢查更新", 202)
+	_tray_menu.add_item("設定…", 203)
+	_tray_menu.add_separator()
+	_tray_menu.add_item("結束", 299)
+	_tray_menu.id_pressed.connect(_on_tray_menu)
+	add_child(_tray_menu)
+
+	## 圖示用 Doro icon
+	var icon: Texture2D = load("res://assets/doro/icon.png")
+	_tray_id = DisplayServer.create_status_indicator(icon, "DoroPet — 點擊顯示 / 隱藏", _on_tray_click)
+
+func _on_tray_click(mouse_button: int, mouse_pos: Vector2i) -> void:
+	if mouse_button == MOUSE_BUTTON_LEFT:
+		_toggle_window_hidden()
+	elif mouse_button == MOUSE_BUTTON_RIGHT:
+		_tray_menu.reset_size()
+		## 螢幕座標彈出
+		_tray_menu.position = mouse_pos
+		_tray_menu.popup()
+
+func _on_tray_menu(id: int) -> void:
+	match id:
+		200: _toggle_window_hidden()
+		201:
+			_show_window_if_hidden()
+			_open_input()
+		202:
+			if _update_url != "":
+				OS.shell_open(_update_url)
+			else:
+				_updater.call("reset_notified")
+				_updater.call("check")
+		203:
+			_show_window_if_hidden()
+			_open_settings()
+		299:
+			get_tree().quit()
+
+func _toggle_window_hidden() -> void:
+	if _hidden:
+		_show_window_if_hidden()
+	else:
+		_hide_window_to_tray()
+
+func _hide_window_to_tray() -> void:
+	_hidden = true
+	get_window().hide()
+	if _bubble_window != null: _bubble_window.hide()
+	if _input_window != null: _input_window.hide()
+
+func _show_window_if_hidden() -> void:
+	if not _hidden:
+		return
+	_hidden = false
+	get_window().show()
+	get_window().always_on_top = _always_on_top
 
 func _apply_msaa() -> void:
 	var v: Viewport = get_viewport()
@@ -296,6 +368,7 @@ func _build_menu() -> void:
 	_menu.add_item("設定…", 40)
 	_menu.add_item("檢查更新 (v%s)" % Updater.current_version(), 41)
 	_menu.add_separator()
+	_menu.add_item("隱藏到系統匣", 50)
 	_menu.add_item("結束", 99)
 	_menu.id_pressed.connect(_on_menu)
 	add_child(_menu)
@@ -331,8 +404,20 @@ func _on_menu(id: int) -> void:
 				_show_bubble("檢查更新中…(目前 v%s)" % Updater.current_version(), 2.0)
 				_updater.call("reset_notified")
 				_updater.call("check")
+		50:
+			_hide_window_to_tray()
 		99:
+			_cleanup_tray()
 			get_tree().quit()
+
+func _cleanup_tray() -> void:
+	if _tray_id >= 0:
+		DisplayServer.delete_status_indicator(_tray_id)
+		_tray_id = -1
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_PREDELETE:
+		_cleanup_tray()
 
 func _cycle_expression() -> void:
 	if _expression_ids.is_empty() or model == null:
