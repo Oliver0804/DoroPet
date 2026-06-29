@@ -25,6 +25,10 @@ emotion 對應表（依當下心情選一個最貼切的）：
  8 = 開心
  9 = 調皮吐舌頭
 10 = 失神（放空、累了、無聊）
+11 = 點頭(回答 yes、同意、附和時用)
+12 = 搖頭(回答 no、拒絕、否定時用)
+13 = 眯眼(壞笑、不爽、懷疑時用)
+14 = 挑眉(疑惑、調侃、挑釁時用)
 
 絕對禁止：純文字、解釋、code fence、多個 JSON。只回一個物件。"""
 const MAX_HISTORY: int = 8                 ## 對話 context 上限（user+assistant 訊息對）
@@ -185,7 +189,7 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 		var emo: int = int((obj as Dictionary).get("emotion", 0))
 		var txt: String = String((obj as Dictionary)["text"]).strip_edges()
 		DoroLogger.log("chat_response", {"text": txt, "emotion": emo, "model": _model, "latency_ms": latency_ms})
-		reply_received.emit(txt, clamp(emo, 0, 10))
+		reply_received.emit(txt, clamp(emo, 0, 14))
 	else:
 		DoroLogger.log("chat_response", {"text": clean, "raw": true, "model": _model, "latency_ms": latency_ms})
 		reply_received.emit(clean, 0)

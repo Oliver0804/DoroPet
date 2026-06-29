@@ -30,11 +30,25 @@ const EMOTION_MAP: Dictionary = {
 	9: "TongueOut",     ## 調皮吐舌頭
 	10: "Highlight OFF",## 失神
 }
-## 給 UI 顯示的人類可讀名（順序與 EMOTION_MAP 對齊）
+## 給 UI 顯示的人類可讀名（順序與 EMOTION_MAP 對齊)
 const EMOTION_LABELS: Array = [
 	"😠 生氣", "😑 無言", "😲 驚訝", "❓ 疑問", "😎 酷酷",
 	"🎁 禮物", "⏳ 讀取中", "😄 開心", "😝 調皮吐舌", "😵 失神",
 ]
+## 動作(非 .exp3.json,跑參數動畫):
+##   11 = 點頭(yes,ParamAngleY 上下振盪)
+##   12 = 搖頭(no,ParamAngleX 左右振盪)
+##   13 = 眯眼
+##   14 = 挑眉
+const ACTION_LABELS: Array = [
+	{"id": 11, "label": "👍 點頭(yes)"},
+	{"id": 12, "label": "👎 搖頭(no)"},
+	{"id": 13, "label": "😏 眯眼"},
+	{"id": 14, "label": "🤨 挑眉"},
+]
+var _action_anim_t: float = -1.0          ## >=0 動作動畫進行中
+var _action_anim_id: int = 0              ## 當前動作 id
+const ACTION_DURATION: float = 1.4
 var _drag_offset: Vector2 = Vector2.ZERO
 var _dragging: bool = false
 var _menu: PopupMenu
@@ -69,6 +83,7 @@ const Updater := preload("res://scripts/updater.gd")
 var _logs_viewer: Window
 var _updater: Node
 var _update_url: String = ""
+var _auto_check_updates: bool = true
 var _chat: Node                            ## ChatClient 實例
 var _voice: Node                           ## VoiceClient 實例
 var _bubble_window: Window                 ## 浮在 Doro 頭頂的對話氣泡（獨立視窗）
@@ -91,7 +106,7 @@ var _smooth_mouth: float = 0.0
 const MOUTH_LERP_SPEED: float = 20.0       ## 嘴巴 LERP 要快，才能跟上聲音
 
 ## 眨眼 / 挑眉(idle 期間隨機 trigger)
-var _blink_t: float = 3.5                  ## 距離下一次眨眼倒數
+var _blink_t: float = 15.0                  ## 距離下一次眨眼倒數
 var _blink_anim_t: float = -1.0            ## 正在播眨眼動畫的時間(>=0 時 active)
 const BLINK_DURATION: float = 0.18         ## 一次眨眼總時長
 var _brow_t: float = 12.0
@@ -122,17 +137,22 @@ func _setup_updater() -> void:
 	add_child(_updater)
 	_updater.update_available.connect(_on_update_available)
 	_updater.up_to_date.connect(_on_up_to_date)
-	## 啟動延遲 5 秒查更新,避免影響開啟速度
+	## 啟動延遲 5 秒查更新
 	await get_tree().create_timer(5.0).timeout
 	_updater.call("check")
+	## 自動輪詢開關
+	if _auto_check_updates:
+		_updater.call("start_polling")
 
 func _on_update_available(latest_tag: String, url: String) -> void:
 	_update_url = url
-	_show_bubble("🎉 新版 %s 可用!右鍵 → 下載新版" % latest_tag, 10.0)
-	## 把 menu 項目改顯眼
+	_show_bubble("🎉 新版 %s 可用!右鍵 → 下載新版" % latest_tag, 12.0)
 	var idx: int = _menu.get_item_index(41)
 	if idx >= 0:
 		_menu.set_item_text(idx, "⬇ 下載新版 %s" % latest_tag)
+	## TTS 念出來(如果開了)
+	if _voice and _voice.call("is_tts_enabled"):
+		_voice.call("speak", "主人,有新版本可以更新喔~")
 
 func _on_up_to_date() -> void:
 	var idx: int = _menu.get_item_index(41)
@@ -250,10 +270,13 @@ func _build_menu() -> void:
 	var emo_sub: PopupMenu = PopupMenu.new()
 	emo_sub.name = "EmotionSubMenu"
 	for i in EMOTION_LABELS.size():
-		emo_sub.add_item(EMOTION_LABELS[i], 100 + (i + 1))   ## id = 101..110 對應 emotion 1..10
+		emo_sub.add_item(EMOTION_LABELS[i], 100 + (i + 1))   ## 101..110 = emotion 1..10
+	emo_sub.add_separator()
+	for a in ACTION_LABELS:
+		emo_sub.add_item(a.label, 100 + a.id)                ## 111..114 = action
 	emo_sub.id_pressed.connect(_on_menu)
 	_menu.add_child(emo_sub)
-	_menu.add_submenu_item("選擇表情 ▸", "EmotionSubMenu")
+	_menu.add_submenu_item("表情 / 動作 ▸", "EmotionSubMenu")
 	_menu.add_item("重設表情", 1)
 	_menu.add_separator()
 	_menu.add_item("放大 (+)", 20)
@@ -268,8 +291,8 @@ func _build_menu() -> void:
 	add_child(_menu)
 
 func _on_menu(id: int) -> void:
-	## 101..110 是 emotion submenu(直接設指定表情)
-	if id >= 101 and id <= 110:
+	## 101..114 = emotion 1..10 + action 11..14
+	if id >= 101 and id <= 114:
 		_set_emotion(id - 100)
 		return
 	match id:
@@ -296,6 +319,7 @@ func _on_menu(id: int) -> void:
 				OS.shell_open(_update_url)
 			else:
 				_show_bubble("檢查更新中…(目前 v%s)" % Updater.current_version(), 2.0)
+				_updater.call("reset_notified")
 				_updater.call("check")
 		99:
 			get_tree().quit()
@@ -402,6 +426,33 @@ func _process(dt: float) -> void:
 	_update_blink(dt)
 	## --- 挑眉(隨機,較不頻繁)---
 	_update_brow(dt)
+	## --- 點頭 / 搖頭 / 眯眼 / 挑眉 一次性動作 ---
+	_update_action(dt)
+
+func _update_action(dt: float) -> void:
+	if _action_anim_t < 0.0:
+		return
+	_action_anim_t += dt
+	var t: float = _action_anim_t / ACTION_DURATION
+	if t >= 1.0:
+		_action_anim_t = -1.0
+		return
+	## 加在現有 smooth 值上,動畫結束後 LERP 會把參數帶回正常
+	match _action_anim_id:
+		11:    ## 點頭:兩次上下,Y 振盪
+			var v: float = sin(t * PI * 4.0) * 25.0
+			_set_param("ParamAngleY", -v)
+		12:    ## 搖頭:兩次左右,X 振盪
+			var v: float = sin(t * PI * 4.0) * 30.0
+			_set_param("ParamAngleX", v)
+		13:    ## 眯眼:雙眼縮到 0.2,維持後恢復
+			var v: float = 1.0 - sin(t * PI) * 0.85
+			_set_param("ParamEyeLOpen", v)
+			_set_param("ParamEyeROpen", v)
+		14:    ## 挑眉:雙眉抬高,1 全幅度
+			var v: float = sin(t * PI) * 1.0
+			_set_param("ParamBrowLY", v)
+			_set_param("ParamBrowRY", v)
 
 func _update_blink(dt: float) -> void:
 	if _thinking:
@@ -426,7 +477,7 @@ func _update_blink(dt: float) -> void:
 			_blink_anim_t = 0.0
 
 func _schedule_next_blink() -> void:
-	_blink_t = randf_range(2.0, 5.0)   ## 平均每 3.5 秒眨一次,人類正常頻率
+	_blink_t = randf_range(10.0, 30.0)   ## 10–30 秒眨一次
 
 func _update_brow(dt: float) -> void:
 	if _thinking:
@@ -441,7 +492,7 @@ func _update_brow(dt: float) -> void:
 		else:
 			## sin 曲線:平滑上下
 			var t: float = _brow_anim_t / BROW_DURATION
-			var v: float = sin(t * PI) * 0.6   ## 0→0.6→0
+			var v: float = sin(t * PI) * 1.0   ## 0→1.0→0,挑眉幅度全開
 			_set_param("ParamBrowLY", v)
 			_set_param("ParamBrowRY", v)
 	else:
@@ -738,13 +789,21 @@ func _on_chat_reply(text: String, emotion: int) -> void:
 func _set_emotion(emo: int) -> void:
 	if model == null:
 		return
-	## user 介入(不是 auto 觸發)→ 取消自動 reset,讓 user 選的表情留住直到下次互動
+	## user 介入 → 取消自動 reset
 	if not _setting_auto_emo and _auto_emo_reset_timer != null:
 		_auto_emo_reset_timer.stop()
+	## 11..14 = 動作(動畫,非 .exp3.json)
+	if emo >= 11 and emo <= 14:
+		_trigger_action(emo)
+		return
 	if emo <= 0 or not EMOTION_MAP.has(emo):
 		model.call("stop_expression")
 		return
 	model.call("start_expression", EMOTION_MAP[emo])
+
+func _trigger_action(action_id: int) -> void:
+	_action_anim_id = action_id
+	_action_anim_t = 0.0
 
 func _begin_thinking() -> void:
 	_thinking = true
@@ -906,6 +965,7 @@ func _open_settings() -> void:
 		"vad_threshold": _vad_threshold,
 		"vad_silence_sec": _vad_silence_sec,
 		"msaa": _msaa,
+		"auto_check_updates": _auto_check_updates,
 	}
 	_settings.open(data, _chat.call("get_status"), _voice.call("stt_status") if _voice else "")
 
@@ -935,6 +995,14 @@ func _on_settings_changed(data: Dictionary) -> void:
 	if new_msaa != _msaa:
 		_msaa = new_msaa
 		_apply_msaa()
+	var new_auto: bool = bool(data.get("auto_check_updates", _auto_check_updates))
+	if new_auto != _auto_check_updates:
+		_auto_check_updates = new_auto
+		if _updater:
+			if _auto_check_updates:
+				_updater.call("start_polling")
+			else:
+				_updater.call("stop_polling")
 	_apply_scale()
 	get_window().always_on_top = _always_on_top
 	if _chat:
@@ -977,6 +1045,7 @@ func _load_config() -> void:
 	_vad_threshold = float(cfg.get_value("pet", "vad_threshold", _vad_threshold))
 	_vad_silence_sec = float(cfg.get_value("pet", "vad_silence_sec", _vad_silence_sec))
 	_msaa = int(cfg.get_value("pet", "msaa", _msaa))
+	_auto_check_updates = bool(cfg.get_value("pet", "auto_check_updates", _auto_check_updates))
 
 func _save_config() -> void:
 	var cfg: ConfigFile = ConfigFile.new()
@@ -996,6 +1065,7 @@ func _save_config() -> void:
 	cfg.set_value("pet", "vad_threshold", _vad_threshold)
 	cfg.set_value("pet", "vad_silence_sec", _vad_silence_sec)
 	cfg.set_value("pet", "msaa", _msaa)
+	cfg.set_value("pet", "auto_check_updates", _auto_check_updates)
 	if _chat:
 		cfg.set_value("chat", "api_key", _chat.call("get_api_key"))
 		cfg.set_value("chat", "model", _chat.call("get_model"))

@@ -62,6 +62,9 @@ var _capturing_hotkey: bool = false
 var _stt_local_rows: Array[Control] = []
 var _stt_cloud_rows: Array[Control] = []
 
+## 自動更新
+var _auto_update_check: CheckBox
+
 ## VAD
 var _vad_check: CheckBox
 var _vad_threshold_slider: HSlider
@@ -115,6 +118,7 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 	_hotkey_keycode = int(initial.get("hotkey_keycode", KEY_SPACE))
 	_hotkey_mods = int(initial.get("hotkey_mods", 0))
 	_refresh_hotkey_btn()
+	_auto_update_check.button_pressed = bool(initial.get("auto_check_updates", true))
 	_vad_check.button_pressed = bool(initial.get("vad_enabled", true))
 	_vad_threshold_slider.value = float(initial.get("vad_threshold", 0.02))
 	_vad_silence_spin.value = float(initial.get("vad_silence_sec", 1.2))
@@ -249,6 +253,12 @@ func _build_ui() -> void:
 	hk_row.add_child(_hotkey_btn)
 	hk_row.add_child(hk_hint)
 	vb.add_child(hk_row)
+
+	## 自動檢查更新(每 10 分鐘 + TTS 通知)
+	_auto_update_check = CheckBox.new()
+	_auto_update_check.text = "每 10 分鐘檢查更新 + 用語音通知"
+	_auto_update_check.toggled.connect(_on_any_toggled)
+	vb.add_child(_auto_update_check)
 
 	## VAD 自動分段送出
 	_vad_check = CheckBox.new()
@@ -612,6 +622,7 @@ func _collect() -> Dictionary:
 		"hotkey_keycode": _hotkey_keycode,
 		"hotkey_mods": _hotkey_mods,
 		"vad_enabled": _vad_check.button_pressed,
+		"auto_check_updates": _auto_update_check.button_pressed,
 		"vad_threshold": _vad_threshold_slider.value,
 		"vad_silence_sec": _vad_silence_spin.value,
 	}
