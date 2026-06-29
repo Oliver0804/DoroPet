@@ -7,30 +7,36 @@ signal error_occurred(reason: String)
 
 const ENDPOINT: String = "https://openrouter.ai/api/v1/chat/completions"
 const DEFAULT_MODEL: String = "bytedance-seed/seed-1.6-flash"
-const DEFAULT_PERSONA: String = """你是 Doro，一隻住在電腦桌面上的可愛 Q 版貓咪寵物。
-個性活潑撒嬌、有點呆萌，會用第一人稱「Doro」或「我」自稱。
-回覆務必非常簡短（30 字以內），口語、加一點顏文字或波浪線~ 像在跟主人說話。
+## 只有「人設」段給 user 編輯,「系統規則」永遠 append 在後面
+const DEFAULT_PERSONA: String = """你是 Doro，一隻住在電腦桌面陪伴主人的可愛 Q 版小寵物(不是貓)。
+個性:活潑撒嬌、有點呆萌、好奇心強、偶爾耍小聰明。
+語氣:自稱『Doro』或『我』,口語化、加一點波浪線~,像跟主人撒嬌或聊天。
+回覆務必非常簡短(50 字以內)。不要 emoji 符號圖示。"""
 
-【嚴格輸出格式】只輸出一個 JSON 物件，不要 Markdown、不要 ```code fence```、不要任何前後綴文字：
-{"emotion": <1-10 的整數>, "text": "你要對主人說的話"}
+## 系統規則:寫死,user 改不到。每次 send 自動 append 在 _persona 之後
+const SYSTEM_RULES: String = """
+========== 系統規則(不可違反) ==========
 
-emotion 對應表（依當下心情選一個最貼切的）：
- 1 = 生氣
- 2 = 無言
- 3 = 驚訝
- 4 = 疑問
- 5 = 酷酷
- 6 = 禮物（給主人東西、提到禮物或好康時）
- 7 = 讀取中（思考、卡住、需要時間）
- 8 = 開心
- 9 = 調皮吐舌頭
-10 = 失神（放空、累了、無聊）
-11 = 點頭(回答 yes、同意、附和時用)
-12 = 搖頭(回答 no、拒絕、否定時用)
-13 = 眯眼(壞笑、不爽、懷疑時用)
-14 = 挑眉(疑惑、調侃、挑釁時用)
+【輸出格式】只輸出**一個** JSON 物件,不要 Markdown / code fence / 前後綴文字 / 多個 JSON。
+{"emotion": <1-14 的整數>, "text": "你要對主人說的話"}
 
-絕對禁止：純文字、解釋、code fence、多個 JSON。只回一個物件。"""
+【emotion 對應】
+ 1=生氣 2=無言 3=驚訝 4=疑問 5=酷酷 6=禮物(給東西/提到好康)
+ 7=讀取中(思考、需要時間) 8=開心 9=調皮吐舌頭 10=失神(放空累了)
+ 11=點頭(yes/同意/附和) 12=搖頭(no/拒絕/否定)
+ 13=眯眼(壞笑/不爽/懷疑) 14=挑眉(疑惑/調侃/挑釁)
+
+【語音輸入容錯】
+使用者的訊息有時是語音轉文字結果,可能含同音字、錯字、缺字、缺標點。
+請先嘗試還原使用者真正想說的意思(根據語境、上下文、近音字),再回覆。
+若仍看不懂,可用 emotion=4(疑問)反問澄清。
+
+【工具呼叫】
+你有 get_time、get_weather、take_screenshot 三個工具。
+當使用者問時間、天氣、或要你看螢幕內容,**主動呼叫對應工具**取得最新資料再回答,
+不要瞎掰或猜測。
+
+【絕對禁止】純文字、解釋、code fence、多個 JSON、emoji 圖示。"""
 const MAX_HISTORY: int = 8                 ## 對話 context 上限（user+assistant 訊息對）
 const TIMEOUT_SEC: float = 30.0
 
@@ -58,6 +64,14 @@ const TOOLS_SCHEMA: Array = [
 			},
 		},
 	},
+	{
+		"type": "function",
+		"function": {
+			"name": "take_screenshot",
+			"description": "拍主螢幕當下畫面。當使用者問你『看畫面』『螢幕上是什麼』『這段 code 哪錯』等需要視覺資訊的問題就呼叫;截圖會放在下一條訊息給你看。",
+			"parameters": {"type": "object", "properties": {}, "required": []},
+		},
+	},
 ]
 const MAX_TOOL_ROUNDS: int = 3              ## 防 LLM 無限呼叫
 
@@ -71,6 +85,7 @@ var _persona: String = DEFAULT_PERSONA
 var _in_flight: bool = false
 var _request_started_ms: int = 0
 var _round: int = 0
+var _pending_image_b64: String = ""              ## LLM call take_screenshot 後待塞的圖
 
 ## ---------- runtime 設定 ----------
 func set_api_key(k: String) -> void:
@@ -135,7 +150,9 @@ func send(user_text: String, image_b64: String = "") -> void:
 	if _history.size() > MAX_HISTORY * 2:
 		_history = _history.slice(_history.size() - MAX_HISTORY * 2)
 
-	var messages: Array = [{"role": "system", "content": _persona}]
+	## 最終 system prompt = user 人設 + 系統規則(規則永遠 append,user 改不到)
+	var full_system: String = _persona.strip_edges() + "\n" + SYSTEM_RULES
+	var messages: Array = [{"role": "system", "content": full_system}]
 	if image_b64 == "":
 		messages.append_array(_history)
 	else:
@@ -165,6 +182,16 @@ func send(user_text: String, image_b64: String = "") -> void:
 
 ## 真正送 round (可含 tool result),共用 in-flight state
 func _send_round() -> void:
+	## 若有 pending 截圖,在送出前 append 一條 user multimodal message
+	if _pending_image_b64 != "":
+		_running_messages.append({
+			"role": "user",
+			"content": [
+				{"type": "text", "text": "這是剛拍的螢幕截圖,請看畫面內容回答上面的問題:"},
+				{"type": "image_url", "image_url": {"url": "data:image/png;base64," + _pending_image_b64}},
+			],
+		})
+		_pending_image_b64 = ""
 	var body: Dictionary = {
 		"model": _model,
 		"messages": _running_messages,
@@ -268,7 +295,50 @@ func _execute_tool(name: String, args: Dictionary) -> String:
 		"get_weather":
 			var city: String = String(args.get("city", "Taipei"))
 			return await _tool_get_weather(city)
+		"take_screenshot":
+			return _tool_take_screenshot()
 	return "(未知工具: %s)" % name
+
+func _tool_take_screenshot() -> String:
+	var b64: String = _capture_screen_b64()
+	if b64 == "":
+		return "(截圖失敗或視覺功能已被關閉)"
+	_pending_image_b64 = b64
+	return "(已截圖完成,圖片附在下一條 user 訊息給你看)"
+
+## 跟 pet.gd 的 _grab_screenshot_b64 邏輯一致,獨立一份避免循環依賴
+func _capture_screen_b64() -> String:
+	var tmp: String = OS.get_environment("TMPDIR")
+	if tmp == "":
+		tmp = OS.get_environment("TEMP")
+	if tmp == "":
+		tmp = "/tmp"
+	var path: String = tmp.rstrip("/").rstrip("\\") + ("/" if OS.get_name() != "Windows" else "\\") + "doropet_llm_screen.png"
+	var rc: int = -1
+	if OS.get_name() == "macOS":
+		rc = OS.execute("/usr/sbin/screencapture", ["-x", "-t", "png", "-m", path], [], false)
+	elif OS.get_name() == "Windows":
+		var ps_path: String = path.replace("/", "\\")
+		var script: String = (
+			"Add-Type -AssemblyName System.Windows.Forms,System.Drawing;" +
+			"$s=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds;" +
+			"$b=New-Object System.Drawing.Bitmap $s.Width,$s.Height;" +
+			"$g=[System.Drawing.Graphics]::FromImage($b);" +
+			"$g.CopyFromScreen($s.Location,[System.Drawing.Point]::Empty,$s.Size);" +
+			"$b.Save('%s',[System.Drawing.Imaging.ImageFormat]::Png);" +
+			"$g.Dispose();$b.Dispose();") % ps_path
+		rc = OS.execute("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], [], false)
+	if rc != 0 or not FileAccess.file_exists(path):
+		return ""
+	var f: FileAccess = FileAccess.open(path, FileAccess.READ)
+	if f == null:
+		return ""
+	var bytes: PackedByteArray = f.get_buffer(f.get_length())
+	f.close()
+	var saved: String = DoroLogger.save_screenshot(bytes)
+	if saved != "":
+		DoroLogger.log("screenshot_captured", {"path": saved, "bytes": bytes.size(), "by": "llm_tool"})
+	return Marshalls.raw_to_base64(bytes)
 
 func _tool_get_time() -> String:
 	var dt: Dictionary = Time.get_datetime_dict_from_system()
