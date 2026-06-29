@@ -147,10 +147,11 @@ func _setup_tray() -> void:
 		return
 	## tray 專用 PopupMenu
 	_tray_menu = PopupMenu.new()
-	_tray_menu.add_item("顯示 / 隱藏", 200)
-	_tray_menu.add_item("跟 Doro 對話", 201)
+	_tray_menu.add_item("💬 跟 Doro 對話", 201)
+	_tray_menu.add_item("顯示 / 隱藏 Doro", 200)
 	_tray_menu.add_separator()
 	_tray_menu.add_item("檢查更新", 202)
+	_tray_menu.add_item("一鍵更新並重啟", 204)
 	_tray_menu.add_item("設定…", 203)
 	_tray_menu.add_separator()
 	_tray_menu.add_item("結束", 299)
@@ -163,10 +164,12 @@ func _setup_tray() -> void:
 
 func _on_tray_click(mouse_button: int, mouse_pos: Vector2i) -> void:
 	if mouse_button == MOUSE_BUTTON_LEFT:
-		_toggle_window_hidden()
+		## 左鍵 = 顯示 Doro + 立即開對話輸入框(等同全局熱鍵替代)
+		_show_window_if_hidden()
+		get_window().grab_focus()
+		_open_input()
 	elif mouse_button == MOUSE_BUTTON_RIGHT:
 		_tray_menu.reset_size()
-		## 螢幕座標彈出
 		_tray_menu.position = mouse_pos
 		_tray_menu.popup()
 
@@ -175,6 +178,7 @@ func _on_tray_menu(id: int) -> void:
 		200: _toggle_window_hidden()
 		201:
 			_show_window_if_hidden()
+			get_window().grab_focus()
 			_open_input()
 		202:
 			if _update_url != "":
@@ -185,7 +189,10 @@ func _on_tray_menu(id: int) -> void:
 		203:
 			_show_window_if_hidden()
 			_open_settings()
+		204:
+			_install_latest_and_restart()
 		299:
+			_cleanup_tray()
 			get_tree().quit()
 
 func _toggle_window_hidden() -> void:
