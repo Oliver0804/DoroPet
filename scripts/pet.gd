@@ -167,12 +167,13 @@ func _auto_emo_reset() -> void:
 	_schedule_next_auto_emo()
 
 func _load_model() -> void:
-	## 用 ClassDB.instantiate 避免編輯器解析期找不到 GDExtension 類別
 	if not ClassDB.class_exists("GDCubismUserModel"):
 		push_error("找不到 GDCubismUserModel — 確認 addons/gd_cubism 已啟用")
 		return
 	model = ClassDB.instantiate("GDCubismUserModel")
 	model.set("assets", model_path)
+	## 用內建 texture filter 強制走 linear+mipmaps(對抗縮放鋸齒)
+	model.set("texture_filter", CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS)
 	_apply_scale()
 	add_child(model)
 
@@ -185,7 +186,7 @@ func _reload_model(new_path: String) -> void:
 		model = null
 	_expression_ids.clear()
 	_expression_index = 0
-	_load_model()
+	_load_model()                  ## 已 add 到 _ss_viewport
 	_collect_expressions()
 	_show_bubble("已切換模型:%s" % new_path.get_file(), 3.0)
 
@@ -198,7 +199,6 @@ func _apply_scale() -> void:
 	if model == null:
 		return
 	model.set("scale", Vector2(model_scale, model_scale))
-	## 算出貼合 size，視窗 resize 且保持中心
 	var new_w: int = max(int(round(model_scale * BASE_W)), 160)
 	var new_h: int = max(int(round(model_scale * BASE_H)), 200)
 	var old_pos: Vector2i = DisplayServer.window_get_position()
