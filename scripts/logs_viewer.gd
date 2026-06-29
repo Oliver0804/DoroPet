@@ -104,22 +104,58 @@ func _on_file_selected(idx: int) -> void:
 	_refresh_entries()
 
 func _refresh_entries() -> void:
+	_entries.clear()
 	if _current_file == "":
-		_entries.text = ""
 		return
 	var rows: Array = DoroLogger.read_log(_current_file, 500)
 	var filter_idx: int = _filter.selected
-	var lines: PackedStringArray = []
+	var rendered: int = 0
 	for r in rows:
 		var t: String = r.get("type", "")
 		if filter_idx == 1 and not t.begins_with("chat_"): continue
 		if filter_idx == 2 and not t.begins_with("stt_"): continue
 		if filter_idx == 3 and not t.ends_with("_error"): continue
-		lines.append(_format_entry(r))
-	if lines.is_empty():
-		_entries.text = "[i](沒有符合的記錄)[/i]"
-	else:
-		_entries.text = "\n".join(lines)
+		_append_entry(r)
+		rendered += 1
+	if rendered == 0:
+		_entries.append_text("[i](沒有符合的記錄)[/i]")
+
+func _append_entry(e: Dictionary) -> void:
+	var ts: String = e.get("ts", "")
+	var typ: String = e.get("type", "")
+	var color: String = "#888888"
+	if typ.begins_with("chat_response") or typ.begins_with("stt_response"):
+		color = "#3aa05a"
+	elif typ.ends_with("_error"):
+		color = "#d04848"
+	elif typ.ends_with("_request"):
+		color = "#3a7ed8"
+	elif typ == "screenshot_captured":
+		color = "#c08040"
+	_entries.append_text("[color=%s][b]%s[/b][/color]  [color=#888]%s[/color]\n" % [color, typ, ts])
+	for k in e.keys():
+		if k == "ts" or k == "type": continue
+		var val: Variant = e[k]
+		var s: String = JSON.stringify(val) if typeof(val) != TYPE_STRING else String(val)
+		if s.length() > 300:
+			s = s.substr(0, 300) + "…"
+		if k == "path" and typ == "screenshot_captured":
+			_entries.append_text("  %s: [url=file://%s][color=#4ea3ff]%s[/color][/url]\n" % [k, val, val])
+		else:
+			_entries.append_text("  %s: %s\n" % [k, s])
+	## 截圖 entry → 直接 inline 縮圖
+	if typ == "screenshot_captured":
+		var path: String = String(e.get("path", ""))
+		if path != "" and FileAccess.file_exists(path):
+			var img: Image = Image.new()
+			if img.load(path) == OK:
+				var tex: ImageTexture = ImageTexture.create_from_image(img)
+				## meta 帶絕對路徑,點縮圖打開檔案
+				_entries.push_meta("file://" + path)
+				_entries.add_image(tex, 280, 0)   ## 寬 280,高自動
+				_entries.pop()
+				_entries.append_text("\n  [i]([color=#666]點縮圖放大[/color])[/i]\n")
+	_entries.append_text("\n")
 
 func _export_md() -> void:
 	if _current_file == "":
