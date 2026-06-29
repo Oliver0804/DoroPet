@@ -41,9 +41,9 @@ var _menu: PopupMenu
 var _gaze_follow: bool = true
 var _bubble_seconds: float = 8.0
 var _always_on_top: bool = true
-## 對話熱鍵（預設 Space,可在設定面板改）
-var _hotkey_keycode: int = KEY_SPACE
-var _hotkey_mods: int = 0                  ## bitmask: cmd=1, ctrl=2, alt=4, shift=8
+## 對話熱鍵（預設 ⇧D,可在設定面板改）
+var _hotkey_keycode: int = KEY_D
+var _hotkey_mods: int = 8                  ## bitmask: cmd=1, ctrl=2, alt=4, shift=8
 ## VAD（語音活動偵測）
 var _vad_enabled: bool = true
 var _vad_threshold: float = 0.02           ## RMS 門檻：> 視為有聲

@@ -54,9 +54,13 @@ var _mic_test_bar: ProgressBar
 
 ## 熱鍵
 var _hotkey_btn: Button
-var _hotkey_keycode: int = KEY_SPACE
-var _hotkey_mods: int = 0
+var _hotkey_keycode: int = KEY_D
+var _hotkey_mods: int = 8           ## ⇧
 var _capturing_hotkey: bool = false
+
+## STT 條件顯示用
+var _stt_local_rows: Array[Control] = []
+var _stt_cloud_rows: Array[Control] = []
 
 ## VAD
 var _vad_check: CheckBox
@@ -100,6 +104,7 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 	_voice_local_model.text = initial.get("voice_local_model", "")
 	var eng: String = initial.get("voice_engine", "local")
 	_voice_engine.select(0 if eng == "local" else 1)
+	_update_stt_visibility()
 	_tts_enabled.button_pressed = initial.get("tts_enabled", true)
 	var v: String = initial.get("tts_voice", "Mei-Jia")
 	for i in _tts_voice.item_count:
@@ -340,9 +345,9 @@ func _build_ui() -> void:
 	_persona_edit.text_changed.connect(_on_persona_changed)
 	vb.add_child(_persona_edit)
 
-	## ---------- 語音 ----------
+	## ---------- 🎙 STT — 語音輸入 ----------
 	vb.add_child(_separator())
-	vb.add_child(_section("語音（Whisper STT + macOS say TTS）"))
+	vb.add_child(_section("🎙 STT — 語音輸入"))
 
 	_voice_status = Label.new()
 	_voice_status.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
@@ -384,17 +389,17 @@ func _build_ui() -> void:
 	eng_cap.text = "STT 引擎"
 	eng_cap.custom_minimum_size = Vector2(90, 0)
 	_voice_engine = OptionButton.new()
-	_voice_engine.add_item("本地 (whisper.cpp)")
-	_voice_engine.add_item("雲端 (OpenAI 兼容)")
-	_voice_engine.item_selected.connect(func(_i: int) -> void: _emit())
+	_voice_engine.add_item("本地 (whisper.cpp,免費離線)")
+	_voice_engine.add_item("雲端 API (OpenAI 兼容)")
+	_voice_engine.item_selected.connect(_on_voice_engine_changed)
 	eng_row.add_child(eng_cap)
 	eng_row.add_child(_voice_engine)
 	vb.add_child(eng_row)
 
-	## --- 本地 ---
+	## --- 本地配置(選本地時才顯示)---
 	var lbin_row: HBoxContainer = HBoxContainer.new()
 	var lbin_cap: Label = Label.new()
-	lbin_cap.text = "本地 binary"
+	lbin_cap.text = "binary 路徑"
 	lbin_cap.custom_minimum_size = Vector2(90, 0)
 	_voice_local_bin = LineEdit.new()
 	_voice_local_bin.placeholder_text = "/opt/homebrew/bin/whisper-cli"
@@ -403,10 +408,11 @@ func _build_ui() -> void:
 	lbin_row.add_child(lbin_cap)
 	lbin_row.add_child(_voice_local_bin)
 	vb.add_child(lbin_row)
+	_stt_local_rows.append(lbin_row)
 
 	var lmodel_row: HBoxContainer = HBoxContainer.new()
 	var lmodel_cap: Label = Label.new()
-	lmodel_cap.text = "本地 model"
+	lmodel_cap.text = "model 路徑"
 	lmodel_cap.custom_minimum_size = Vector2(90, 0)
 	_voice_local_model = LineEdit.new()
 	_voice_local_model.placeholder_text = "~/.local/share/doropet/whisper-models/ggml-base.bin"
@@ -415,24 +421,26 @@ func _build_ui() -> void:
 	lmodel_row.add_child(lmodel_cap)
 	lmodel_row.add_child(_voice_local_model)
 	vb.add_child(lmodel_row)
+	_stt_local_rows.append(lmodel_row)
 
-	## --- 雲端 ---
+	## --- 雲端配置(選雲端時才顯示)---
 	var vkey_row: HBoxContainer = HBoxContainer.new()
 	var vkey_cap: Label = Label.new()
-	vkey_cap.text = "雲端 API Key"
+	vkey_cap.text = "API Key"
 	vkey_cap.custom_minimum_size = Vector2(90, 0)
 	_voice_api_key = LineEdit.new()
 	_voice_api_key.secret = true
-	_voice_api_key.placeholder_text = "sk-... (OpenAI 等兼容服務)"
+	_voice_api_key.placeholder_text = "sk-... (OpenAI / Groq / 自架 server)"
 	_voice_api_key.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_voice_api_key.text_changed.connect(_on_text_changed)
 	vkey_row.add_child(vkey_cap)
 	vkey_row.add_child(_voice_api_key)
 	vb.add_child(vkey_row)
+	_stt_cloud_rows.append(vkey_row)
 
 	var vep_row: HBoxContainer = HBoxContainer.new()
 	var vep_cap: Label = Label.new()
-	vep_cap.text = "雲端 Endpoint"
+	vep_cap.text = "Endpoint"
 	vep_cap.custom_minimum_size = Vector2(90, 0)
 	_voice_endpoint = LineEdit.new()
 	_voice_endpoint.placeholder_text = "https://api.openai.com/v1/audio/transcriptions"
@@ -441,10 +449,11 @@ func _build_ui() -> void:
 	vep_row.add_child(vep_cap)
 	vep_row.add_child(_voice_endpoint)
 	vb.add_child(vep_row)
+	_stt_cloud_rows.append(vep_row)
 
 	var vmodel_row: HBoxContainer = HBoxContainer.new()
 	var vmodel_cap: Label = Label.new()
-	vmodel_cap.text = "雲端 model"
+	vmodel_cap.text = "model"
 	vmodel_cap.custom_minimum_size = Vector2(90, 0)
 	_voice_model = LineEdit.new()
 	_voice_model.placeholder_text = "whisper-1 / whisper-large-v3-turbo …"
@@ -453,13 +462,23 @@ func _build_ui() -> void:
 	vmodel_row.add_child(vmodel_cap)
 	vmodel_row.add_child(_voice_model)
 	vb.add_child(vmodel_row)
+	_stt_cloud_rows.append(vmodel_row)
+
+	## ---------- 🔊 TTS — 語音輸出 ----------
+	vb.add_child(_separator())
+	vb.add_child(_section("🔊 TTS — 語音輸出"))
+
+	_tts_enabled = CheckBox.new()
+	_tts_enabled.text = "Doro 用語音回覆"
+	_tts_enabled.toggled.connect(_on_any_toggled)
+	vb.add_child(_tts_enabled)
 
 	var voice_row: HBoxContainer = HBoxContainer.new()
 	var voice_cap: Label = Label.new()
-	voice_cap.text = "TTS 聲音"
-	voice_cap.custom_minimum_size = Vector2(80, 0)
+	voice_cap.text = "聲音"
+	voice_cap.custom_minimum_size = Vector2(90, 0)
 	_tts_voice = OptionButton.new()
-	## 直接 require VoiceClient.suggested_voices()
+	_tts_voice.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	var vc: GDScript = load("res://scripts/voice_client.gd")
 	var voices: Array = vc.call("suggested_voices")
 	for v in voices:
@@ -468,11 +487,6 @@ func _build_ui() -> void:
 	voice_row.add_child(voice_cap)
 	voice_row.add_child(_tts_voice)
 	vb.add_child(voice_row)
-
-	_tts_enabled = CheckBox.new()
-	_tts_enabled.text = "Doro 用語音回覆（macOS say）"
-	_tts_enabled.toggled.connect(_on_any_toggled)
-	vb.add_child(_tts_enabled)
 
 	## 底部按鈕在 outer（scroll 外），永遠看得到
 	var sep_bot: HSeparator = HSeparator.new()
@@ -633,6 +647,18 @@ func _on_close() -> void:
 		_mic_test_btn.button_pressed = false
 	_emit()
 	hide()
+
+## ---------- STT 引擎切換 ----------
+func _on_voice_engine_changed(_i: int) -> void:
+	_update_stt_visibility()
+	_emit()
+
+func _update_stt_visibility() -> void:
+	var is_local: bool = _voice_engine.selected == 0
+	for r in _stt_local_rows:
+		r.visible = is_local
+	for r in _stt_cloud_rows:
+		r.visible = not is_local
 
 ## ---------- 對話熱鍵 capture ----------
 func _refresh_hotkey_btn() -> void:
