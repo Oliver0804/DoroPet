@@ -26,3 +26,4 @@ build_*.log
 # 下載下來的 build artifact 不入版控
 windows-build/
 build/
+*.zip
