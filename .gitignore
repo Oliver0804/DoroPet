@@ -27,3 +27,4 @@ build_*.log
 windows-build/
 build/
 *.zip
+macos-build/

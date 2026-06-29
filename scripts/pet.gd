@@ -236,6 +236,27 @@ func _on_update_available(latest_tag: String, url: String) -> void:
 	if _voice and _voice.call("is_tts_enabled"):
 		_voice.call("speak", "主人,有新版本可以更新喔~")
 
+func _install_latest_and_restart() -> void:
+	var os_name: String = OS.get_name()
+	if os_name != "macOS" and os_name != "Windows":
+		_show_bubble("一鍵更新目前只支援 macOS / Windows", 4.0)
+		return
+	_show_bubble("⬇️ 下載最新版中...請等一下", 3.0)
+	if _voice and _voice.call("is_tts_enabled"):
+		_voice.call("speak", "Doro 準備自己更新嘍~")
+	## 給 TTS + bubble 一點露臉時間,然後退出讓 installer 接手
+	await get_tree().create_timer(1.5).timeout
+	var ok: bool = false
+	if os_name == "macOS":
+		ok = Updater.install_macos_latest()
+	else:
+		ok = Updater.install_windows_latest()
+	if ok:
+		_cleanup_tray()
+		get_tree().quit()
+	else:
+		_show_bubble("啟動更新腳本失敗 :(", 3.0)
+
 func _on_up_to_date() -> void:
 	var idx: int = _menu.get_item_index(41)
 	if idx >= 0:
@@ -367,6 +388,8 @@ func _build_menu() -> void:
 	_menu.add_separator()
 	_menu.add_item("設定…", 40)
 	_menu.add_item("檢查更新 (v%s)" % Updater.current_version(), 41)
+	if OS.get_name() == "macOS" or OS.get_name() == "Windows":
+		_menu.add_item("⬇️ 一鍵更新並重啟", 42)
 	_menu.add_separator()
 	_menu.add_item("隱藏到系統匣", 50)
 	_menu.add_item("結束", 99)
@@ -404,6 +427,8 @@ func _on_menu(id: int) -> void:
 				_show_bubble("檢查更新中…(目前 v%s)" % Updater.current_version(), 2.0)
 				_updater.call("reset_notified")
 				_updater.call("check")
+		42:
+			_install_latest_and_restart()
 		50:
 			_hide_window_to_tray()
 		99:

@@ -70,6 +70,98 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 	else:
 		up_to_date.emit()
 
+## 觸發 macOS 一鍵下載 + 取代 + 重啟。回 bool 表示有沒有真的啟動 installer。
+## 1. 找 latest release 內副檔名為 .dmg 的 asset
+## 2. fork shell 跑 download + mount + cp + open + 終
+## 3. 呼叫端 quit self,新 process 接手
+static func install_macos_latest() -> bool:
+	if OS.get_name() != "macOS":
+		return false
+	## 寫一段 shell 到 /tmp 跑(避免 quoting 問題)
+	var script: String = """#!/bin/bash
+set -e
+DMG_URL="https://github.com/Oliver0804/DoroPet/releases/latest/download/DoroPet.dmg"
+DMG="/tmp/DoroPet-update.dmg"
+MNT="/Volumes/DoroPet"
+
+# 等舊 process 退(最多 5 秒)
+for i in 1 2 3 4 5; do
+  pgrep -x DoroPet > /dev/null || break
+  sleep 1
+done
+
+curl -L --silent -o "$DMG" "$DMG_URL"
+[ -f "$DMG" ] || exit 1
+hdiutil attach "$DMG" -nobrowse -quiet
+rm -rf "/Applications/DoroPet.app"
+cp -R "$MNT/DoroPet.app" /Applications/
+hdiutil detach "$MNT" -quiet || true
+rm -f "$DMG"
+xattr -dr com.apple.quarantine /Applications/DoroPet.app 2>/dev/null || true
+osascript -e 'display notification "DoroPet 已更新到最新版" with title "DoroPet"' 2>/dev/null || true
+sleep 1
+open /Applications/DoroPet.app
+"""
+	var path: String = "/tmp/doropet_install.sh"
+	var f: FileAccess = FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		return false
+	f.store_string(script)
+	f.close()
+	OS.execute("/bin/chmod", ["+x", path])
+	## non-blocking 啟動,主 process 立刻退出
+	var pid: int = OS.create_process("/bin/bash", [path])
+	return pid > 0
+
+## Windows 一鍵下載 + 取代 + 重啟。
+## 由 PowerShell 接手:等本程序退 → 下載 → 解壓 → 覆蓋安裝目錄 → 啟動。
+## 不支援裝在 Program Files 等需要 admin 的目錄。
+static func install_windows_latest() -> bool:
+	if OS.get_name() != "Windows":
+		return false
+	var exe_path: String = OS.get_executable_path()
+	var install_dir: String = exe_path.get_base_dir()
+	var pid: int = OS.get_process_id()
+	## PowerShell 路徑用單引號避免特殊字
+	var ps_script: String = """
+$ErrorActionPreference = 'SilentlyContinue'
+Wait-Process -Id %d -Timeout 15 -ErrorAction SilentlyContinue
+Start-Sleep -Milliseconds 800
+
+$zip = Join-Path $env:TEMP 'DoroPet-update.zip'
+$dir = Join-Path $env:TEMP 'DoroPet-update'
+$url = 'https://github.com/Oliver0804/DoroPet/releases/latest/download/DoroPet-Windows-x86_64.zip'
+
+Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
+if (Test-Path $dir) { Remove-Item -Recurse -Force $dir }
+Expand-Archive -Path $zip -DestinationPath $dir -Force
+
+$installDir = %s
+Copy-Item -Recurse -Force (Join-Path $dir '*') $installDir
+
+Remove-Item -Recurse -Force $dir
+Remove-Item -Force $zip
+
+Start-Process (Join-Path $installDir 'DoroPet.exe')
+""" % [pid, _ps_quote(install_dir)]
+
+	var tmp_dir: String = OS.get_environment("TEMP")
+	if tmp_dir == "": tmp_dir = "C:\\Windows\\Temp"
+	var script_path: String = tmp_dir + "\\doropet_install.ps1"
+	var f: FileAccess = FileAccess.open(script_path, FileAccess.WRITE)
+	if f == null:
+		return false
+	f.store_string(ps_script)
+	f.close()
+	var new_pid: int = OS.create_process("powershell.exe", [
+		"-NoProfile", "-ExecutionPolicy", "Bypass", "-File", script_path
+	])
+	return new_pid > 0
+
+static func _ps_quote(s: String) -> String:
+	## PowerShell 單引號內單引號要連兩個
+	return "'" + s.replace("'", "''") + "'"
+
 ## 簡單版本比較:逐段 int 比(支援 a.b.c 不要 pre-release)
 static func _version_gt(a: String, b: String) -> bool:
 	var aa: PackedStringArray = a.split(".")
