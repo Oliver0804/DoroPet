@@ -35,13 +35,42 @@ const MAX_HISTORY: int = 8                 ## 對話 context 上限（user+assis
 const TIMEOUT_SEC: float = 30.0
 
 const DoroLogger := preload("res://scripts/logger.gd")
+const TOOLS_SCHEMA: Array = [
+	{
+		"type": "function",
+		"function": {
+			"name": "get_time",
+			"description": "拿到使用者當下的本地時間(含星期、日期)。當使用者問『現在幾點』『今天星期幾』之類就呼叫。",
+			"parameters": {"type": "object", "properties": {}, "required": []},
+		},
+	},
+	{
+		"type": "function",
+		"function": {
+			"name": "get_weather",
+			"description": "查指定城市目前的天氣與溫度。當使用者問天氣、要不要帶傘、外面冷不冷之類就呼叫。",
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"city": {"type": "string", "description": "城市英文名,例:Taipei、Tokyo、New York。"}
+				},
+				"required": ["city"],
+			},
+		},
+	},
+]
+const MAX_TOOL_ROUNDS: int = 3              ## 防 LLM 無限呼叫
+
 var _http: HTTPRequest
+var _tool_http: HTTPRequest                ## 給 weather 等 tool 用
 var _history: Array = []                   ## [{role,content}, ...]
+var _running_messages: Array = []          ## 當前 in-flight 的 messages(可含 tool_calls)
 var _api_key: String = ""
 var _model: String = DEFAULT_MODEL
 var _persona: String = DEFAULT_PERSONA
 var _in_flight: bool = false
 var _request_started_ms: int = 0
+var _round: int = 0
 
 ## ---------- runtime 設定 ----------
 func set_api_key(k: String) -> void:
@@ -78,6 +107,9 @@ func _ready() -> void:
 	_http.timeout = TIMEOUT_SEC
 	_http.request_completed.connect(_on_response)
 	add_child(_http)
+	_tool_http = HTTPRequest.new()
+	_tool_http.timeout = 10.0
+	add_child(_tool_http)
 
 func is_enabled() -> bool:
 	return _api_key != ""
@@ -119,18 +151,8 @@ func send(user_text: String, image_b64: String = "") -> void:
 			],
 		})
 
-	var body: Dictionary = {
-		"model": _model,
-		"messages": messages,
-		"max_tokens": 200,
-		"temperature": 0.8,
-	}
-	var headers: PackedStringArray = [
-		"Authorization: Bearer " + _api_key,
-		"Content-Type: application/json",
-		"HTTP-Referer: https://github.com/DoroPet",  ## OpenRouter 建議帶來源
-		"X-Title: DoroPet",
-	]
+	_running_messages = messages
+	_round = 0
 	_in_flight = true
 	_request_started_ms = Time.get_ticks_msec()
 	DoroLogger.log("chat_request", {
@@ -139,6 +161,24 @@ func send(user_text: String, image_b64: String = "") -> void:
 		"has_image": image_b64 != "",
 		"history_size": _history.size(),
 	})
+	_send_round()
+
+## 真正送 round (可含 tool result),共用 in-flight state
+func _send_round() -> void:
+	var body: Dictionary = {
+		"model": _model,
+		"messages": _running_messages,
+		"max_tokens": 400,
+		"temperature": 0.8,
+		"tools": TOOLS_SCHEMA,
+		"tool_choice": "auto",
+	}
+	var headers: PackedStringArray = [
+		"Authorization: Bearer " + _api_key,
+		"Content-Type: application/json",
+		"HTTP-Referer: https://github.com/DoroPet",
+		"X-Title: DoroPet",
+	]
 	var err: int = _http.request(ENDPOINT, headers, HTTPClient.METHOD_POST, JSON.stringify(body))
 	if err != OK:
 		_in_flight = false
@@ -147,35 +187,61 @@ func send(user_text: String, image_b64: String = "") -> void:
 		error_occurred.emit("HTTPRequest 啟動失敗: %d" % err)
 
 func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByteArray) -> void:
-	_in_flight = false
 	var latency_ms: int = Time.get_ticks_msec() - _request_started_ms
 	if result != HTTPRequest.RESULT_SUCCESS:
+		_in_flight = false
 		_history.pop_back()
 		DoroLogger.log("chat_error", {"reason": "network result=%d" % result, "latency_ms": latency_ms})
 		error_occurred.emit("網路錯誤 (result=%d)" % result)
 		return
 	var text: String = body.get_string_from_utf8()
 	if code < 200 or code >= 300:
+		_in_flight = false
 		_history.pop_back()
 		DoroLogger.log("chat_error", {"reason": "HTTP %d" % code, "body": text.substr(0, 500), "latency_ms": latency_ms})
 		error_occurred.emit("HTTP %d: %s" % [code, text.substr(0, 200)])
 		return
 	var parsed: Variant = JSON.parse_string(text)
 	if typeof(parsed) != TYPE_DICTIONARY:
+		_in_flight = false
 		_history.pop_back()
 		error_occurred.emit("回覆格式異常")
 		return
 	var data: Dictionary = parsed
 	if not data.has("choices") or (data["choices"] as Array).is_empty():
+		_in_flight = false
 		_history.pop_back()
 		var msg: String = "無 choices"
 		if data.has("error"):
 			msg = JSON.stringify(data["error"])
 		error_occurred.emit(msg)
 		return
-	var reply: String = data["choices"][0]["message"]["content"]
+	var message: Dictionary = data["choices"][0]["message"]
+	## 若 LLM 要求呼叫 tool → 跑 + 把結果塞回 messages 再 round
+	if message.has("tool_calls") and (message["tool_calls"] as Array).size() > 0 and _round < MAX_TOOL_ROUNDS:
+		_round += 1
+		_running_messages.append(message)   ## assistant turn 含 tool_calls
+		var tool_calls: Array = message["tool_calls"]
+		for tc in tool_calls:
+			var fn_name: String = tc["function"]["name"]
+			var fn_args_str: String = String(tc["function"].get("arguments", "{}"))
+			var args_parser: JSON = JSON.new()
+			var args: Dictionary = {}
+			if args_parser.parse(fn_args_str) == OK and typeof(args_parser.data) == TYPE_DICTIONARY:
+				args = args_parser.data
+			var result: String = await _execute_tool(fn_name, args)
+			DoroLogger.log("tool_call", {"name": fn_name, "args": args, "result": result.substr(0, 200)})
+			_running_messages.append({
+				"role": "tool",
+				"tool_call_id": tc["id"],
+				"content": result,
+			})
+		_send_round()
+		return
+	## 無 tool_calls → 一般文字回覆,清 in-flight
+	_in_flight = false
+	var reply: String = String(message.get("content", ""))
 	_history.append({"role": "assistant", "content": reply})
-	## 嘗試 parse JSON {emotion, text}；失敗 fallback 為原文 + emotion=0
 	var clean: String = reply.strip_edges()
 	## 去掉可能的 ``` 或 ```json fence
 	if clean.begins_with("```"):
@@ -193,3 +259,37 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 	else:
 		DoroLogger.log("chat_response", {"text": clean, "raw": true, "model": _model, "latency_ms": latency_ms})
 		reply_received.emit(clean, 0)
+
+## ---------- Tools 實作 ----------
+func _execute_tool(name: String, args: Dictionary) -> String:
+	match name:
+		"get_time":
+			return _tool_get_time()
+		"get_weather":
+			var city: String = String(args.get("city", "Taipei"))
+			return await _tool_get_weather(city)
+	return "(未知工具: %s)" % name
+
+func _tool_get_time() -> String:
+	var dt: Dictionary = Time.get_datetime_dict_from_system()
+	var weekdays: PackedStringArray = ["週日","週一","週二","週三","週四","週五","週六"]
+	return "%04d-%02d-%02d %02d:%02d:%02d (%s)" % [
+		dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, weekdays[dt.weekday]
+	]
+
+## wttr.in 免費 API,format=3 回單行(location, condition, temp, wind)
+func _tool_get_weather(city: String) -> String:
+	var url: String = "https://wttr.in/%s?format=3" % city.uri_encode()
+	var headers: PackedStringArray = ["User-Agent: curl/7", "Accept-Language: zh-TW,en"]
+	var err: int = _tool_http.request(url, headers)
+	if err != OK:
+		return "(取天氣失敗 err=%d)" % err
+	var result: Array = await _tool_http.request_completed
+	var code: int = result[1]
+	var body: PackedByteArray = result[3]
+	if code < 200 or code >= 300:
+		return "(天氣 API HTTP %d)" % code
+	var text: String = body.get_string_from_utf8().strip_edges()
+	if text == "":
+		return "(沒拿到天氣資料)"
+	return text
