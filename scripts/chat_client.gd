@@ -229,12 +229,12 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 			var args: Dictionary = {}
 			if args_parser.parse(fn_args_str) == OK and typeof(args_parser.data) == TYPE_DICTIONARY:
 				args = args_parser.data
-			var result: String = await _execute_tool(fn_name, args)
-			DoroLogger.log("tool_call", {"name": fn_name, "args": args, "result": result.substr(0, 200)})
+			var tool_result: String = await _execute_tool(fn_name, args)
+			DoroLogger.log("tool_call", {"name": fn_name, "args": args, "result": tool_result.substr(0, 200)})
 			_running_messages.append({
 				"role": "tool",
 				"tool_call_id": tc["id"],
-				"content": result,
+				"content": tool_result,
 			})
 		_send_round()
 		return
