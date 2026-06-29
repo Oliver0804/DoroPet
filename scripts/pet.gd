@@ -738,6 +738,7 @@ func _build_chat_ui() -> void:
 	_voice.connect("stt_error", _on_voice_error)
 	_voice.connect("recording_started", _on_recording_started)
 	_voice.connect("recording_stopped", _on_recording_stopped)
+	_voice.connect("speaking_finished", _on_tts_finished)
 
 	var v_engine: String = _config_get("voice", "engine", "local")
 	_voice.call("set_engine", v_engine)
@@ -927,10 +928,18 @@ func _on_submit(text: String) -> void:
 func _on_chat_reply(text: String, emotion: int) -> void:
 	_end_thinking()
 	_set_emotion(emotion)
-	_show_bubble(text, _bubble_seconds)
-	## 不論文字 / 語音輸入，只要 TTS 開著就念
+	## 若 TTS 啟用:bubble 保持顯示直到 TTS 念完(再延長 _bubble_seconds)
 	if _voice and _voice.call("is_tts_enabled"):
+		_show_bubble(text, 999.0)
 		_voice.call("speak", text)
+	else:
+		_show_bubble(text, _bubble_seconds)
+
+func _on_tts_finished() -> void:
+	## TTS 念完後 bubble 再停留 user 設的秒數
+	if _bubble_window != null and _bubble_window.visible and not _recording_ui:
+		_bubble_timer.stop()
+		_bubble_timer.start(_bubble_seconds)
 
 func _set_emotion(emo: int) -> void:
 	if model == null:
