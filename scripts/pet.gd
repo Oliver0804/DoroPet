@@ -48,7 +48,17 @@ const ACTION_LABELS: Array = [
 ]
 var _action_anim_t: float = -1.0          ## >=0 動作動畫進行中
 var _action_anim_id: int = 0              ## 當前動作 id
-const ACTION_DURATION: float = 1.4
+
+## 不同動作不同時長
+const ACTION_DURATIONS: Dictionary = {
+	11: 1.4,    ## 點頭
+	12: 1.4,    ## 搖頭
+	13: 2.6,    ## 眯眼(分階段:快眯 + 停留 + 緩睜)
+	14: 2.0,    ## 挑眉(久一點才看得明顯)
+}
+
+func _action_duration(id: int) -> float:
+	return float(ACTION_DURATIONS.get(id, 1.4))
 var _drag_offset: Vector2 = Vector2.ZERO
 var _dragging: bool = false
 var _menu: PopupMenu
@@ -433,11 +443,11 @@ func _update_action(dt: float) -> void:
 	if _action_anim_t < 0.0:
 		return
 	_action_anim_t += dt
-	var t: float = _action_anim_t / ACTION_DURATION
+	var dur: float = _action_duration(_action_anim_id)
+	var t: float = _action_anim_t / dur
 	if t >= 1.0:
 		_action_anim_t = -1.0
 		return
-	## 加在現有 smooth 值上,動畫結束後 LERP 會把參數帶回正常
 	match _action_anim_id:
 		11:    ## 點頭:兩次上下,Y 振盪
 			var v: float = sin(t * PI * 4.0) * 25.0
@@ -445,14 +455,33 @@ func _update_action(dt: float) -> void:
 		12:    ## 搖頭:兩次左右,X 振盪
 			var v: float = sin(t * PI * 4.0) * 30.0
 			_set_param("ParamAngleX", v)
-		13:    ## 眯眼:雙眼縮到 0.2,維持後恢復
-			var v: float = 1.0 - sin(t * PI) * 0.85
+		13:    ## 眯眼:快眯→停→緩睜
+			##   t∈[0, 0.15]   1 → 0.15
+			##   t∈[0.15, 0.7] 維持 0.15
+			##   t∈[0.7, 1.0]  0.15 → 1
+			var v: float
+			if t < 0.15:
+				v = lerp(1.0, 0.15, t / 0.15)
+			elif t < 0.7:
+				v = 0.15
+			else:
+				v = lerp(0.15, 1.0, (t - 0.7) / 0.3)
 			_set_param("ParamEyeLOpen", v)
 			_set_param("ParamEyeROpen", v)
-		14:    ## 挑眉:雙眉抬高,1 全幅度
-			var v: float = sin(t * PI) * 1.0
-			_set_param("ParamBrowLY", v)
-			_set_param("ParamBrowRY", v)
+		14:    ## 挑眉:快抬→停→緩降 + 同時頭微抬讓動作明顯
+			var brow: float
+			if t < 0.15:
+				brow = lerp(0.0, 1.0, t / 0.15)
+			elif t < 0.75:
+				brow = 1.0
+			else:
+				brow = lerp(1.0, 0.0, (t - 0.75) / 0.25)
+			_set_param("ParamBrowLY", brow)
+			_set_param("ParamBrowRY", brow)
+			## 配合眼睛瞇 + 頭微抬,挑眉更明顯
+			_set_param("ParamEyeLOpen", 1.0 - brow * 0.25)
+			_set_param("ParamEyeROpen", 1.0 - brow * 0.25)
+			_set_param("ParamAngleY", -brow * 6.0)
 
 func _update_blink(dt: float) -> void:
 	if _thinking:
