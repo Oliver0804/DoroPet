@@ -100,6 +100,7 @@ var _proactive_chat_enabled: bool = false       ## Doro 主動搭話
 var _proactive_chat_min_sec: float = 600.0      ## idle 多久觸發(預設 10 分鐘)
 var _proactive_chat_max_sec: float = 1800.0     ## 上限 30 分鐘
 var _proactive_prompt: String = ""              ## 自訂搭話指令(留空用預設)
+var _proactive_with_screenshot: bool = false    ## 主動搭話時自動拍螢幕一起送
 var _proactive_timer: Timer
 const DEFAULT_PROACTIVE_PROMPT: String = "(系統提示:主人靜默了一段時間,你主動找他/她聊個有趣或關心的話題,維持 30 字內。話題可以是天氣、時間、最近有沒有累、想吃什麼等貼心關懷,或分享你今天的『心情』。)"
 
@@ -177,11 +178,17 @@ func _on_proactive_timer() -> void:
 		return
 	_last_input_voice = false
 	_begin_thinking()
-	_show_bubble("💭 Doro 想說話…", 999.0)
 	var p: String = _proactive_prompt.strip_edges()
 	if p == "":
 		p = DEFAULT_PROACTIVE_PROMPT
-	_chat.call("send", p)
+	var img: String = ""
+	if _proactive_with_screenshot and _vision_enabled:
+		_show_bubble("📸 Doro 偷看一眼螢幕…", 999.0)
+		img = _grab_screenshot_b64()
+		if img != "":
+			p += "\n(附上剛拍的螢幕截圖,可基於畫面內容主動搭話)"
+	_show_bubble("💭 Doro 想說話…", 999.0)
+	_chat.call("send", p, img)
 	_schedule_proactive()
 
 ## ---------- 結束 ----------
@@ -1204,6 +1211,7 @@ func _open_settings() -> void:
 		"proactive_chat_max_sec": _proactive_chat_max_sec,
 		"proactive_prompt": _proactive_prompt,
 		"proactive_prompt_default": DEFAULT_PROACTIVE_PROMPT,
+		"proactive_with_screenshot": _proactive_with_screenshot,
 	}
 	_settings.open(data, _chat.call("get_status"), _voice.call("stt_status") if _voice else "")
 
@@ -1246,6 +1254,7 @@ func _on_settings_changed(data: Dictionary) -> void:
 	_proactive_chat_min_sec = float(data.get("proactive_chat_min_sec", _proactive_chat_min_sec))
 	_proactive_chat_max_sec = float(data.get("proactive_chat_max_sec", _proactive_chat_max_sec))
 	_proactive_prompt = String(data.get("proactive_prompt", _proactive_prompt))
+	_proactive_with_screenshot = bool(data.get("proactive_with_screenshot", _proactive_with_screenshot))
 	if new_proactive != _proactive_chat_enabled:
 		_proactive_chat_enabled = new_proactive
 		if _proactive_chat_enabled:
@@ -1300,6 +1309,7 @@ func _load_config() -> void:
 	_proactive_chat_min_sec = float(cfg.get_value("pet", "proactive_chat_min_sec", _proactive_chat_min_sec))
 	_proactive_chat_max_sec = float(cfg.get_value("pet", "proactive_chat_max_sec", _proactive_chat_max_sec))
 	_proactive_prompt = String(cfg.get_value("pet", "proactive_prompt", _proactive_prompt))
+	_proactive_with_screenshot = bool(cfg.get_value("pet", "proactive_with_screenshot", _proactive_with_screenshot))
 
 func _save_config() -> void:
 	var cfg: ConfigFile = ConfigFile.new()
@@ -1325,6 +1335,7 @@ func _save_config() -> void:
 	cfg.set_value("pet", "proactive_chat_min_sec", _proactive_chat_min_sec)
 	cfg.set_value("pet", "proactive_chat_max_sec", _proactive_chat_max_sec)
 	cfg.set_value("pet", "proactive_prompt", _proactive_prompt)
+	cfg.set_value("pet", "proactive_with_screenshot", _proactive_with_screenshot)
 	if _chat:
 		cfg.set_value("chat", "api_key", _chat.call("get_api_key"))
 		cfg.set_value("chat", "model", _chat.call("get_model"))

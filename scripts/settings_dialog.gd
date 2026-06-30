@@ -71,6 +71,7 @@ var _proactive_check: CheckBox
 var _proactive_min_spin: SpinBox
 var _proactive_max_spin: SpinBox
 var _proactive_prompt_edit: TextEdit
+var _proactive_screenshot_check: CheckBox
 
 ## VAD
 var _vad_check: CheckBox
@@ -132,6 +133,7 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 	_proactive_max_spin.value = float(initial.get("proactive_chat_max_sec", 1800.0))
 	_proactive_prompt_edit.text = String(initial.get("proactive_prompt", ""))
 	_proactive_prompt_edit.placeholder_text = String(initial.get("proactive_prompt_default", ""))
+	_proactive_screenshot_check.button_pressed = bool(initial.get("proactive_with_screenshot", false))
 	_vad_check.button_pressed = bool(initial.get("vad_enabled", true))
 	_vad_threshold_slider.value = float(initial.get("vad_threshold", 0.02))
 	_vad_silence_spin.value = float(initial.get("vad_silence_sec", 1.2))
@@ -415,6 +417,11 @@ func _build_ui() -> void:
 	_proactive_prompt_edit.text_changed.connect(_emit)
 	vb.add_child(_proactive_prompt_edit)
 
+	_proactive_screenshot_check = CheckBox.new()
+	_proactive_screenshot_check.text = "  📸 主動搭話時自動附帶當下螢幕(需勾上方視覺)"
+	_proactive_screenshot_check.toggled.connect(_on_any_toggled)
+	vb.add_child(_proactive_screenshot_check)
+
 	## ---------- 🎙 STT — 語音輸入 ----------
 	vb.add_child(_separator())
 	vb.add_child(_section("🎙 STT — 語音輸入"))
@@ -688,6 +695,7 @@ func _collect() -> Dictionary:
 		"proactive_chat_min_sec": _proactive_min_spin.value,
 		"proactive_chat_max_sec": _proactive_max_spin.value,
 		"proactive_prompt": _proactive_prompt_edit.text,
+		"proactive_with_screenshot": _proactive_screenshot_check.button_pressed,
 		"vad_threshold": _vad_threshold_slider.value,
 		"vad_silence_sec": _vad_silence_spin.value,
 	}

@@ -475,25 +475,60 @@ func stop_speaking() -> void:
 		_tts_player.stop()
 
 ## 跨平台 TTS 聲音建議名(直接顯示在設定下拉)
+## macOS: 動態 query say -v ? 取得系統實際裝的聲音
+## Windows: 動態 query SpeechSynthesizer.GetInstalledVoices()
 static func suggested_voices() -> Array[String]:
+	if OS.get_name() == "macOS":
+		return _available_macos_voices()
 	if OS.get_name() == "Windows":
-		return [
-			"Microsoft Hanhan",      ## 台繁女
-			"Microsoft Yating",      ## 台繁女(新版)
-			"Microsoft Huihui",      ## 簡中女
-			"Microsoft Tracy",       ## 港粵女
-			"Microsoft Haruka",      ## 日文女
-			"Microsoft Ichiro",      ## 日文男
-			"Microsoft Zira",        ## 英文女
-			"Microsoft David",       ## 英文男
-		]
-	## macOS 預設
-	return [
-		"Mei-Jia",       ## 繁中女
-		"Sin-ji",        ## 粵語女
-		"Tingting",      ## 簡中女
-		"Kyoko",         ## 日文女
-		"Otoya",         ## 日文男
-		"Samantha",      ## 英文女
-		"Daniel",        ## 英文男
-	]
+		return _available_windows_voices()
+	return []
+
+static func _available_macos_voices() -> Array[String]:
+	var out: Array[String] = []
+	var lines: Array = []
+	var err: int = OS.execute("/usr/bin/say", ["-v", "?"], lines, false)
+	if err != 0 or lines.is_empty():
+		return ["Samantha"]
+	## stdout 在 lines[0],line 格式:
+	## "Kyoko               ja_JP    # こんにちは! ..."
+	var raw: String = String(lines[0])
+	for ln in raw.split("\n"):
+		var s: String = String(ln).strip_edges()
+		if s == "":
+			continue
+		## 抓 # 號前面那段,取第一個 token(voice name 可能含空格 e.g. "Bad News")
+		var hash_idx: int = s.find("#")
+		var pre: String = s if hash_idx < 0 else s.substr(0, hash_idx)
+		## 由右往左找:語言代碼通常是 xx_XX 格式
+		var parts: PackedStringArray = pre.split(" ", false)
+		if parts.size() < 2:
+			continue
+		## 最後一個是 lang code,剩下合併成 voice name
+		var name_parts: PackedStringArray = parts.slice(0, parts.size() - 1)
+		var name: String = " ".join(name_parts).strip_edges()
+		if name != "" and not out.has(name):
+			out.append(name)
+	out.sort()
+	return out
+
+static func _available_windows_voices() -> Array[String]:
+	var out: Array[String] = []
+	var script: String = (
+		"Add-Type -AssemblyName System.Speech;" +
+		"$s=New-Object System.Speech.Synthesis.SpeechSynthesizer;" +
+		"$s.GetInstalledVoices() | ForEach-Object { $_.VoiceInfo.Name };" +
+		"$s.Dispose();"
+	)
+	var lines: Array = []
+	var err: int = OS.execute("powershell.exe",
+		["-NoProfile", "-NonInteractive", "-Command", script], lines, false)
+	if err != 0 or lines.is_empty():
+		return ["Microsoft Hanhan"]
+	var raw: String = String(lines[0])
+	for ln in raw.split("\n"):
+		var name: String = String(ln).strip_edges()
+		if name != "" and not out.has(name):
+			out.append(name)
+	out.sort()
+	return out
