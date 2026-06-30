@@ -336,6 +336,13 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 	## 去掉可能的 ``` 或 ```json fence
 	if clean.begins_with("```"):
 		clean = clean.trim_prefix("```json").trim_prefix("```").trim_suffix("```").strip_edges()
+	## 剝掉 JSON 物件外的前後綴 (e.g. ByteDance Seed 偶爾 leak "CallEnd|>" control token)
+	var brace_start: int = clean.find("{")
+	var brace_end: int = clean.rfind("}")
+	if brace_start > 0 and brace_end > brace_start:
+		clean = clean.substr(brace_start, brace_end - brace_start + 1)
+	elif brace_start == 0 and brace_end > 0 and brace_end < clean.length() - 1:
+		clean = clean.substr(0, brace_end + 1)
 	## 用 JSON instance silent parse（避免 LLM 回非 JSON 時印 ERROR）
 	var parser: JSON = JSON.new()
 	var obj: Variant = null
