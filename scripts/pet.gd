@@ -191,8 +191,7 @@ func _setup_tray() -> void:
 	_tray_menu.add_item("💬 跟 Doro 對話", 201)
 	_tray_menu.add_item("顯示 / 隱藏 Doro", 200)
 	_tray_menu.add_separator()
-	_tray_menu.add_item("檢查更新", 202)
-	_tray_menu.add_item("一鍵更新並重啟", 204)
+	_tray_menu.add_item("檢查更新 / 下載新版", 202)
 	_tray_menu.add_item("設定…", 203)
 	_tray_menu.add_separator()
 	_tray_menu.add_item("結束", 299)
@@ -223,15 +222,13 @@ func _on_tray_menu(id: int) -> void:
 			_open_input()
 		202:
 			if _update_url != "":
-				OS.shell_open(_update_url)
+				_install_latest_and_restart()
 			else:
 				_updater.call("reset_notified")
 				_updater.call("check")
 		203:
 			_show_window_if_hidden()
 			_open_settings()
-		204:
-			_install_latest_and_restart()
 		299:
 			_cleanup_tray()
 			get_tree().quit()
@@ -436,8 +433,6 @@ func _build_menu() -> void:
 	_menu.add_separator()
 	_menu.add_item("設定…", 40)
 	_menu.add_item("檢查更新 (v%s)" % Updater.current_version(), 41)
-	if OS.get_name() == "macOS" or OS.get_name() == "Windows":
-		_menu.add_item("⬇️ 一鍵更新並重啟", 42)
 	_menu.add_separator()
 	_menu.add_item("隱藏到系統匣", 50)
 	_menu.add_item("結束", 99)
@@ -470,13 +465,12 @@ func _on_menu(id: int) -> void:
 			_open_settings()
 		41:
 			if _update_url != "":
-				OS.shell_open(_update_url)
+				## 已知有新版 → 直接一鍵更新並重啟
+				_install_latest_and_restart()
 			else:
 				_show_bubble("檢查更新中…(目前 v%s)" % Updater.current_version(), 2.0)
 				_updater.call("reset_notified")
 				_updater.call("check")
-		42:
-			_install_latest_and_restart()
 		50:
 			_hide_window_to_tray()
 		99:
