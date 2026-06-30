@@ -264,7 +264,7 @@ func _send_round() -> void:
 	var headers: PackedStringArray = [
 		"Authorization: Bearer " + _api_key,
 		"Content-Type: application/json",
-		"HTTP-Referer: https://github.com/DoroPet",
+		"HTTP-Referer: https://github.com/Oliver0804/DoroPet",
 		"X-Title: DoroPet",
 	]
 	var err: int = _http.request(ENDPOINT, headers, HTTPClient.METHOD_POST, JSON.stringify(body))
