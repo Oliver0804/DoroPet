@@ -47,7 +47,16 @@ var _tts_enabled: bool = true
 
 static func default_voice() -> String:
 	match OS.get_name():
-		"macOS":   return "Mei-Jia"            ## 繁中女
+		"macOS":
+			## 優先挑系統實際裝的 premium 中文聲(Meijia/Sin-ji/Tingting/Yu-shu),
+			## 否則拿第一個 premium voice;再不行才隨意
+			var avail: Array[String] = _available_macos_voices()
+			for prefer in ["Meijia", "Mei-Jia", "Tingting", "Yu-shu", "Sin-ji"]:
+				if prefer in avail:
+					return prefer
+			if not avail.is_empty():
+				return avail[0]
+			return "Samantha"
 		"Windows": return "Microsoft Hanhan"   ## 台繁(若未裝會 fallback default)
 		_:         return ""
 
@@ -127,7 +136,12 @@ func set_local_bin(b: String) -> void: _local_bin = b if b.strip_edges() != "" e
 func get_local_bin() -> String: return _local_bin
 func set_local_model(p: String) -> void: _local_model = p
 func get_local_model() -> String: return _local_model
-func set_voice(v: String) -> void: _voice = v
+func set_voice(v: String) -> void:
+	## macOS: 拒收 Eloquence (含括號的低品質聲);自動改回 default premium
+	if OS.get_name() == "macOS" and v.contains("("):
+		_voice = default_voice()
+		return
+	_voice = v if v != "" else default_voice()
 func get_voice() -> String: return _voice
 func set_tts_enabled(b: bool) -> void: _tts_enabled = b
 func is_tts_enabled() -> bool: return _tts_enabled
@@ -485,32 +499,40 @@ static func suggested_voices() -> Array[String]:
 	return []
 
 static func _available_macos_voices() -> Array[String]:
-	var out: Array[String] = []
+	## 解析 say -v ? → 兩組:premium(無括號,品質好) + eloquence(含括號,1980s 合成器品質差)
+	## 預設只回 premium;若系統完全沒裝 premium 才 fallback eloquence
+	var premium: Array[String] = []
+	var eloquence: Array[String] = []
 	var lines: Array = []
 	var err: int = OS.execute("/usr/bin/say", ["-v", "?"], lines, false)
 	if err != 0 or lines.is_empty():
 		return ["Samantha"]
-	## stdout 在 lines[0],line 格式:
-	## "Kyoko               ja_JP    # こんにちは! ..."
 	var raw: String = String(lines[0])
 	for ln in raw.split("\n"):
 		var s: String = String(ln).strip_edges()
 		if s == "":
 			continue
-		## 抓 # 號前面那段,取第一個 token(voice name 可能含空格 e.g. "Bad News")
 		var hash_idx: int = s.find("#")
 		var pre: String = s if hash_idx < 0 else s.substr(0, hash_idx)
-		## 由右往左找:語言代碼通常是 xx_XX 格式
 		var parts: PackedStringArray = pre.split(" ", false)
 		if parts.size() < 2:
 			continue
-		## 最後一個是 lang code,剩下合併成 voice name
 		var name_parts: PackedStringArray = parts.slice(0, parts.size() - 1)
 		var name: String = " ".join(name_parts).strip_edges()
-		if name != "" and not out.has(name):
-			out.append(name)
-	out.sort()
-	return out
+		if name == "":
+			continue
+		## 含「(」一律視為 Eloquence(macOS 14+ 輕量低品質,1980s 合成風)
+		if name.contains("("):
+			if not eloquence.has(name):
+				eloquence.append(name)
+		else:
+			if not premium.has(name):
+				premium.append(name)
+	premium.sort()
+	if premium.is_empty():
+		eloquence.sort()
+		return eloquence
+	return premium
 
 static func _available_windows_voices() -> Array[String]:
 	var out: Array[String] = []
