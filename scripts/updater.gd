@@ -90,6 +90,10 @@ for i in 1 2 3 4 5; do
   sleep 1
 done
 
+## 先算舊 binary hash(若不存在 OLD_SHA 為空 → 視為新裝)
+OLD_SHA=""
+[ -f "/Applications/DoroPet.app/Contents/MacOS/DoroPet" ] && \
+  OLD_SHA=$(shasum -a 256 /Applications/DoroPet.app/Contents/MacOS/DoroPet 2>/dev/null | awk '{print $1}')
 curl -L --silent -o "$DMG" "$DMG_URL"
 [ -f "$DMG" ] || exit 1
 hdiutil attach "$DMG" -nobrowse -quiet
@@ -98,11 +102,15 @@ cp -R "$MNT/DoroPet.app" /Applications/
 hdiutil detach "$MNT" -quiet || true
 rm -f "$DMG"
 xattr -dr com.apple.quarantine /Applications/DoroPet.app 2>/dev/null || true
-## 重置 TCC 權限:新 binary 跟舊授權的 code hash 不同,系統會擋
-## reset 後 user 講「看螢幕」會跳新對話框重新授權
-tccutil reset ScreenCapture com.bashcat.doropet 2>/dev/null || true
-tccutil reset Microphone com.bashcat.doropet 2>/dev/null || true
-osascript -e 'display notification "DoroPet 已更新到最新版,若視覺/麥克風失效請重新授權" with title "DoroPet"' 2>/dev/null || true
+NEW_SHA=$(shasum -a 256 /Applications/DoroPet.app/Contents/MacOS/DoroPet 2>/dev/null | awk '{print $1}')
+## binary 真變了才 reset TCC,避免 user 重複授權
+if [ "$OLD_SHA" != "$NEW_SHA" ]; then
+  tccutil reset ScreenCapture com.bashcat.doropet 2>/dev/null || true
+  tccutil reset Microphone com.bashcat.doropet 2>/dev/null || true
+  osascript -e 'display notification "DoroPet 已更新,視覺/麥克風需重新授權" with title "DoroPet"' 2>/dev/null || true
+else
+  osascript -e 'display notification "DoroPet 已是最新版(binary 未變)" with title "DoroPet"' 2>/dev/null || true
+fi
 sleep 1
 open /Applications/DoroPet.app
 """
