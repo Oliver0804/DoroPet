@@ -70,6 +70,7 @@ var _vision_check: CheckBox
 var _proactive_check: CheckBox
 var _proactive_min_spin: SpinBox
 var _proactive_max_spin: SpinBox
+var _proactive_prompt_edit: TextEdit
 
 ## VAD
 var _vad_check: CheckBox
@@ -129,6 +130,8 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 	_proactive_check.button_pressed = bool(initial.get("proactive_chat_enabled", false))
 	_proactive_min_spin.value = float(initial.get("proactive_chat_min_sec", 600.0))
 	_proactive_max_spin.value = float(initial.get("proactive_chat_max_sec", 1800.0))
+	_proactive_prompt_edit.text = String(initial.get("proactive_prompt", ""))
+	_proactive_prompt_edit.placeholder_text = String(initial.get("proactive_prompt_default", ""))
 	_vad_check.button_pressed = bool(initial.get("vad_enabled", true))
 	_vad_threshold_slider.value = float(initial.get("vad_threshold", 0.02))
 	_vad_silence_spin.value = float(initial.get("vad_silence_sec", 1.2))
@@ -400,6 +403,17 @@ func _build_ui() -> void:
 	pro_row.add_child(pro_dash)
 	pro_row.add_child(_proactive_max_spin)
 	vb.add_child(pro_row)
+
+	var pp_label: Label = Label.new()
+	pp_label.text = "  搭話 prompt(空 = 預設關懷話題)"
+	pp_label.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
+	pp_label.add_theme_font_size_override("font_size", 12)
+	vb.add_child(pp_label)
+	_proactive_prompt_edit = TextEdit.new()
+	_proactive_prompt_edit.custom_minimum_size = Vector2(0, 80)
+	_proactive_prompt_edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+	_proactive_prompt_edit.text_changed.connect(_emit)
+	vb.add_child(_proactive_prompt_edit)
 
 	## ---------- 🎙 STT — 語音輸入 ----------
 	vb.add_child(_separator())
@@ -673,6 +687,7 @@ func _collect() -> Dictionary:
 		"proactive_chat_enabled": _proactive_check.button_pressed,
 		"proactive_chat_min_sec": _proactive_min_spin.value,
 		"proactive_chat_max_sec": _proactive_max_spin.value,
+		"proactive_prompt": _proactive_prompt_edit.text,
 		"vad_threshold": _vad_threshold_slider.value,
 		"vad_silence_sec": _vad_silence_spin.value,
 	}

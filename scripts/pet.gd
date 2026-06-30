@@ -99,7 +99,9 @@ var _vision_enabled: bool = true                ## 關鍵字截圖視覺
 var _proactive_chat_enabled: bool = false       ## Doro 主動搭話
 var _proactive_chat_min_sec: float = 600.0      ## idle 多久觸發(預設 10 分鐘)
 var _proactive_chat_max_sec: float = 1800.0     ## 上限 30 分鐘
+var _proactive_prompt: String = ""              ## 自訂搭話指令(留空用預設)
 var _proactive_timer: Timer
+const DEFAULT_PROACTIVE_PROMPT: String = "(系統提示:主人靜默了一段時間,你主動找他/她聊個有趣或關心的話題,維持 30 字內。話題可以是天氣、時間、最近有沒有累、想吃什麼等貼心關懷,或分享你今天的『心情』。)"
 
 ## 系統匣 / menu bar 圖示
 var _tray_id: int = -1
@@ -173,11 +175,13 @@ func _on_proactive_timer() -> void:
 	if _chat == null or not _chat.call("is_enabled"):
 		_schedule_proactive()
 		return
-	## 用特殊 prompt 讓 LLM 主動產生一句搭話
 	_last_input_voice = false
 	_begin_thinking()
-	_show_bubble("…(Doro 想說話)", 999.0)
-	_chat.call("send", "(系統提示:主人靜默了一段時間,你主動找他/她聊個有趣或關心的話題,維持 30 字內。)")
+	_show_bubble("💭 Doro 想說話…", 999.0)
+	var p: String = _proactive_prompt.strip_edges()
+	if p == "":
+		p = DEFAULT_PROACTIVE_PROMPT
+	_chat.call("send", p)
 	_schedule_proactive()
 
 ## ---------- 結束 ----------
@@ -1198,6 +1202,8 @@ func _open_settings() -> void:
 		"proactive_chat_enabled": _proactive_chat_enabled,
 		"proactive_chat_min_sec": _proactive_chat_min_sec,
 		"proactive_chat_max_sec": _proactive_chat_max_sec,
+		"proactive_prompt": _proactive_prompt,
+		"proactive_prompt_default": DEFAULT_PROACTIVE_PROMPT,
 	}
 	_settings.open(data, _chat.call("get_status"), _voice.call("stt_status") if _voice else "")
 
@@ -1239,6 +1245,7 @@ func _on_settings_changed(data: Dictionary) -> void:
 	var new_proactive: bool = bool(data.get("proactive_chat_enabled", _proactive_chat_enabled))
 	_proactive_chat_min_sec = float(data.get("proactive_chat_min_sec", _proactive_chat_min_sec))
 	_proactive_chat_max_sec = float(data.get("proactive_chat_max_sec", _proactive_chat_max_sec))
+	_proactive_prompt = String(data.get("proactive_prompt", _proactive_prompt))
 	if new_proactive != _proactive_chat_enabled:
 		_proactive_chat_enabled = new_proactive
 		if _proactive_chat_enabled:
@@ -1292,6 +1299,7 @@ func _load_config() -> void:
 	_proactive_chat_enabled = bool(cfg.get_value("pet", "proactive_chat_enabled", _proactive_chat_enabled))
 	_proactive_chat_min_sec = float(cfg.get_value("pet", "proactive_chat_min_sec", _proactive_chat_min_sec))
 	_proactive_chat_max_sec = float(cfg.get_value("pet", "proactive_chat_max_sec", _proactive_chat_max_sec))
+	_proactive_prompt = String(cfg.get_value("pet", "proactive_prompt", _proactive_prompt))
 
 func _save_config() -> void:
 	var cfg: ConfigFile = ConfigFile.new()
@@ -1316,6 +1324,7 @@ func _save_config() -> void:
 	cfg.set_value("pet", "proactive_chat_enabled", _proactive_chat_enabled)
 	cfg.set_value("pet", "proactive_chat_min_sec", _proactive_chat_min_sec)
 	cfg.set_value("pet", "proactive_chat_max_sec", _proactive_chat_max_sec)
+	cfg.set_value("pet", "proactive_prompt", _proactive_prompt)
 	if _chat:
 		cfg.set_value("chat", "api_key", _chat.call("get_api_key"))
 		cfg.set_value("chat", "model", _chat.call("get_model"))
