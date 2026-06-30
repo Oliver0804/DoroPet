@@ -118,6 +118,10 @@ var _input_window: Window                  ## 浮在 Doro 腳下的輸入框（�
 var _input_box: LineEdit
 var _input_idle_timer: Timer                ## 送出後保留輸入框 N 秒,過了沒動作再關
 const INPUT_IDLE_SEC: float = 5.0
+## 連續對話:STT 送出後 → Doro 回覆/TTS 完成 → 自動繼續錄音等下一輪
+## user 不講話超過 _continuous_timeout_sec 才真關
+var _continuous_voice: bool = true
+var _continuous_timeout_sec: float = 15.0
 var _settings: Window                      ## SettingsDialog 實例
 var _last_input_voice: bool = false        ## 最近一次輸入是否來自語音（決定要不要朗讀回覆）
 var _last_mouse_pos: Vector2 = Vector2.ZERO
@@ -529,6 +533,9 @@ func _process(dt: float) -> void:
 	## VAD：錄音中監聽音量，沉默自動送出
 	if _voice != null and _voice.call("is_recording") and _vad_enabled:
 		if rms > _vad_threshold:
+			if not _vad_has_spoken and _input_idle_timer != null:
+				## user 開講話 → 取消 idle 關閉倒數(連續對話流程)
+				_input_idle_timer.stop()
 			_vad_has_spoken = true
 			_vad_silence_t = 0.0
 		elif _vad_has_spoken:
@@ -1002,12 +1009,27 @@ func _on_chat_reply(text: String, emotion: int) -> void:
 		_voice.call("speak", text)
 	else:
 		_show_bubble(text, _bubble_seconds)
+		## TTS 關閉:沒 speaking_finished signal → 手動觸發連續流程
+		_on_tts_finished()
 
 func _on_tts_finished() -> void:
 	## TTS 念完後 bubble 再停留 user 設的秒數
 	if _bubble_window != null and _bubble_window.visible and not _recording_ui:
 		_bubble_timer.stop()
 		_bubble_timer.start(_bubble_seconds)
+	## 連續對話:input 窗仍開 + 上次來源是語音 → 自動繼續錄等下一輪
+	if _continuous_voice and _last_input_voice and _input_window != null and _input_window.visible:
+		if _voice != null and _voice.call("has_stt") and not _voice.call("is_recording"):
+			_vad_has_spoken = false
+			_vad_silence_t = 0.0
+			_voice.call("start_recording")
+		## 起一個較長的 timeout(user 不講話超過 _continuous_timeout_sec 才真關)
+		_start_continuous_timeout()
+
+func _start_continuous_timeout() -> void:
+	if _input_idle_timer != null:
+		_input_idle_timer.stop()
+		_input_idle_timer.start(_continuous_timeout_sec)
 
 func _set_emotion(emo: int) -> void:
 	if model == null:
@@ -1130,17 +1152,18 @@ func _on_recording_stopped() -> void:
 	_bubble_timer.stop()
 
 func _on_voice_transcribed(text: String) -> void:
-	## STT 完成 → 直接送,但輸入框先保留(5s timer 等下一輪)
+	## STT 完成 → 直接送
 	_last_input_voice = true
 	_show_bubble("「%s」" % text, 2.0)
-	## 短暫延遲讓 user 看到自己講了什麼
 	await get_tree().create_timer(0.3).timeout
 	_show_bubble("💭 Doro 正在想…", 999.0)
 	_chat.call("send", text)
-	## STT 成功送出 → 也開始 5 秒倒數,過了再關
 	if _input_box != null and _input_window.visible:
 		_input_box.text = ""
-		_start_input_idle_timer()
+		## 連續對話模式:不起 idle timer,等 TTS 結束 _on_tts_finished 會自動再開錄音
+		## 非連續模式:5 秒沒下一輪才關
+		if not _continuous_voice:
+			_start_input_idle_timer()
 
 func _on_voice_error(reason: String) -> void:
 	_end_thinking()
@@ -1203,6 +1226,8 @@ func _open_settings() -> void:
 		"vad_enabled": _vad_enabled,
 		"vad_threshold": _vad_threshold,
 		"vad_silence_sec": _vad_silence_sec,
+		"continuous_voice": _continuous_voice,
+		"continuous_timeout_sec": _continuous_timeout_sec,
 		"msaa": _msaa,
 		"auto_check_updates": _auto_check_updates,
 		"vision_enabled": _vision_enabled,
@@ -1237,6 +1262,8 @@ func _on_settings_changed(data: Dictionary) -> void:
 	_vad_enabled = bool(data.get("vad_enabled", _vad_enabled))
 	_vad_threshold = float(data.get("vad_threshold", _vad_threshold))
 	_vad_silence_sec = float(data.get("vad_silence_sec", _vad_silence_sec))
+	_continuous_voice = bool(data.get("continuous_voice", _continuous_voice))
+	_continuous_timeout_sec = float(data.get("continuous_timeout_sec", _continuous_timeout_sec))
 	var new_msaa: int = int(data.get("msaa", _msaa))
 	if new_msaa != _msaa:
 		_msaa = new_msaa
@@ -1302,6 +1329,8 @@ func _load_config() -> void:
 	_vad_enabled = bool(cfg.get_value("pet", "vad_enabled", _vad_enabled))
 	_vad_threshold = float(cfg.get_value("pet", "vad_threshold", _vad_threshold))
 	_vad_silence_sec = float(cfg.get_value("pet", "vad_silence_sec", _vad_silence_sec))
+	_continuous_voice = bool(cfg.get_value("pet", "continuous_voice", _continuous_voice))
+	_continuous_timeout_sec = float(cfg.get_value("pet", "continuous_timeout_sec", _continuous_timeout_sec))
 	_msaa = int(cfg.get_value("pet", "msaa", _msaa))
 	_auto_check_updates = bool(cfg.get_value("pet", "auto_check_updates", _auto_check_updates))
 	_vision_enabled = bool(cfg.get_value("pet", "vision_enabled", _vision_enabled))
@@ -1328,6 +1357,8 @@ func _save_config() -> void:
 	cfg.set_value("pet", "vad_enabled", _vad_enabled)
 	cfg.set_value("pet", "vad_threshold", _vad_threshold)
 	cfg.set_value("pet", "vad_silence_sec", _vad_silence_sec)
+	cfg.set_value("pet", "continuous_voice", _continuous_voice)
+	cfg.set_value("pet", "continuous_timeout_sec", _continuous_timeout_sec)
 	cfg.set_value("pet", "msaa", _msaa)
 	cfg.set_value("pet", "auto_check_updates", _auto_check_updates)
 	cfg.set_value("pet", "vision_enabled", _vision_enabled)

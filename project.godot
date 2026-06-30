@@ -7,7 +7,7 @@ config_version=5
 
 config/name="DoroPet"
 config/description="Doro 桌面寵物 (Live2D)"
-config/version="0.1.23"
+config/version="0.1.24"
 run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.4", "Forward Plus")
 config/icon="res://assets/doro/icon.png"

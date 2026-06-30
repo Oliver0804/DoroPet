@@ -75,6 +75,8 @@ var _proactive_screenshot_check: CheckBox
 
 ## VAD
 var _vad_check: CheckBox
+var _continuous_voice_check: CheckBox
+var _continuous_timeout_spin: SpinBox
 var _vad_threshold_slider: HSlider
 var _vad_threshold_label: Label
 var _vad_silence_spin: SpinBox
@@ -137,6 +139,8 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 	_vad_check.button_pressed = bool(initial.get("vad_enabled", true))
 	_vad_threshold_slider.value = float(initial.get("vad_threshold", 0.02))
 	_vad_silence_spin.value = float(initial.get("vad_silence_sec", 1.2))
+	_continuous_voice_check.button_pressed = bool(initial.get("continuous_voice", true))
+	_continuous_timeout_spin.value = float(initial.get("continuous_timeout_sec", 15.0))
 	_update_vad_threshold_label(_vad_threshold_slider.value)
 	_update_scale_label(_scale_slider.value)
 	popup_centered()
@@ -312,6 +316,26 @@ func _build_ui() -> void:
 	vad_sil_row.add_child(vad_sil_cap)
 	vad_sil_row.add_child(_vad_silence_spin)
 	vb.add_child(vad_sil_row)
+
+	## 連續對話
+	_continuous_voice_check = CheckBox.new()
+	_continuous_voice_check.text = "🔁 連續對話:Doro 講完後自動繼續錄音等下一句"
+	_continuous_voice_check.toggled.connect(_on_any_toggled)
+	vb.add_child(_continuous_voice_check)
+
+	var ct_row: HBoxContainer = HBoxContainer.new()
+	var ct_cap: Label = Label.new()
+	ct_cap.text = "  超時關閉"
+	ct_cap.custom_minimum_size = Vector2(80, 0)
+	_continuous_timeout_spin = SpinBox.new()
+	_continuous_timeout_spin.min_value = 5
+	_continuous_timeout_spin.max_value = 120
+	_continuous_timeout_spin.step = 1
+	_continuous_timeout_spin.suffix = " 秒"
+	_continuous_timeout_spin.value_changed.connect(_on_any_changed)
+	ct_row.add_child(ct_cap)
+	ct_row.add_child(_continuous_timeout_spin)
+	vb.add_child(ct_row)
 
 	vb.add_child(_separator())
 	vb.add_child(_section("對話（OpenRouter）"))
@@ -698,6 +722,8 @@ func _collect() -> Dictionary:
 		"proactive_with_screenshot": _proactive_screenshot_check.button_pressed,
 		"vad_threshold": _vad_threshold_slider.value,
 		"vad_silence_sec": _vad_silence_spin.value,
+		"continuous_voice": _continuous_voice_check.button_pressed,
+		"continuous_timeout_sec": _continuous_timeout_spin.value,
 	}
 
 func _reset_defaults() -> void:
