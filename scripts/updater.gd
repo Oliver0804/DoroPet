@@ -98,7 +98,11 @@ cp -R "$MNT/DoroPet.app" /Applications/
 hdiutil detach "$MNT" -quiet || true
 rm -f "$DMG"
 xattr -dr com.apple.quarantine /Applications/DoroPet.app 2>/dev/null || true
-osascript -e 'display notification "DoroPet 已更新到最新版" with title "DoroPet"' 2>/dev/null || true
+## 重置 TCC 權限:新 binary 跟舊授權的 code hash 不同,系統會擋
+## reset 後 user 講「看螢幕」會跳新對話框重新授權
+tccutil reset ScreenCapture com.bashcat.doropet 2>/dev/null || true
+tccutil reset Microphone com.bashcat.doropet 2>/dev/null || true
+osascript -e 'display notification "DoroPet 已更新到最新版,若視覺/麥克風失效請重新授權" with title "DoroPet"' 2>/dev/null || true
 sleep 1
 open /Applications/DoroPet.app
 """
