@@ -125,6 +125,15 @@ var _continuous_timeout_sec: float = 15.0
 var _settings: Window                      ## SettingsDialog 實例
 var _last_input_voice: bool = false        ## 最近一次輸入是否來自語音（決定要不要朗讀回覆）
 var _pending_bubble_text: String = ""      ## TTS 生成中先壓著的回覆文字，開播才顯示
+var _last_sent_text: String = ""           ## 最近送出的 user 訊息(空頭支票重試用)
+var _last_sent_had_image: bool = false
+var _screen_retry_done: bool = false       ## 每輪只自動補圖重試一次
+
+## LLM 說「我這就看」卻沒呼叫工具的承諾句樣式
+const EMPTY_PROMISE_WORDS: PackedStringArray = [
+	"這就看", "这就看", "正在看", "我看看", "看給你", "看给你",
+	"馬上看", "马上看", "這就回報", "这就回报", "稍等",
+]
 var _last_mouse_pos: Vector2 = Vector2.ZERO
 var _mouse_idle_time: float = 0.0
 const IDLE_TRIGGER_SEC: float = 3.0        ## 多久沒動進入 idle
@@ -1016,6 +1025,9 @@ func _on_submit(text: String) -> void:
 		_show_bubble("📸 Doro 在看畫面…", 999.0)
 		img = _grab_screenshot_b64()
 	_show_bubble("💭 Doro 正在想…", 999.0)
+	_last_sent_text = t
+	_last_sent_had_image = img != ""
+	_screen_retry_done = false
 	_chat.call("send", t, img)
 
 func _start_input_idle_timer() -> void:
@@ -1023,7 +1035,25 @@ func _start_input_idle_timer() -> void:
 		_input_idle_timer.stop()
 		_input_idle_timer.start(INPUT_IDLE_SEC)
 
+func _is_empty_promise(t: String) -> bool:
+	for w in EMPTY_PROMISE_WORDS:
+		if t.contains(w):
+			return true
+	return false
+
 func _on_chat_reply(text: String, emotion: int) -> void:
+	## 空頭支票攔截:LLM 說「這就看」但這輪沒附圖也沒呼叫工具
+	## → 攔下這句話,自動截圖後帶圖重送原問題(每輪最多一次)
+	if not _screen_retry_done and _vision_enabled and not _last_sent_had_image \
+			and _last_sent_text != "" and _is_empty_promise(text):
+		_screen_retry_done = true
+		var img: String = _grab_screenshot_b64()
+		if img != "":
+			DoroLogger.log("screen_promise_retry", {"reply": text.substr(0, 60)})
+			_show_bubble("📸 Doro 在看畫面…", 999.0)
+			_last_sent_had_image = true
+			_chat.call("send", _last_sent_text, img)
+			return
 	_end_thinking()
 	_set_emotion(emotion)
 	## 若 TTS 啟用:文字先壓著,等第一段語音真的開始播才顯示(跟聲音同步;
@@ -1222,6 +1252,9 @@ func _on_voice_transcribed(text: String) -> void:
 		_show_bubble("📸 Doro 在看畫面…", 999.0)
 		img = _grab_screenshot_b64()
 	_show_bubble("💭 Doro 正在想…", 999.0)
+	_last_sent_text = text
+	_last_sent_had_image = img != ""
+	_screen_retry_done = false
 	_chat.call("send", text, img)
 	if _input_box != null and _input_window.visible:
 		_input_box.text = ""
