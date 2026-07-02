@@ -578,12 +578,13 @@ func _process(dt: float) -> void:
 		elif _vad_has_spoken:
 			_vad_silence_t += dt
 			if _vad_silence_t >= _vad_silence_sec:
-				## 自動結束送出
 				_vad_has_spoken = false
 				_vad_silence_t = 0.0
-				_last_input_voice = true
-				_begin_thinking()
-				_voice.call("stop_and_send")
+				## 串流模式:句子由 ASR 伺服器即時斷,本地不重複送
+				if not bool(_voice.call("is_stt_stream")):
+					_last_input_voice = true
+					_begin_thinking()
+					_voice.call("stop_and_send")
 
 	if model == null:
 		return

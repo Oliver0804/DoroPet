@@ -44,6 +44,8 @@ var _asr_busy: bool = false
 const ByteplusSTT := preload("res://scripts/byteplus_stt.gd")
 var _bp_stt: Node
 var _bp_asr_key: String = ""
+var _stt_stream_enabled: bool = true       ## 常駐串流模式(engine=byteplus 時生效)
+var _stream_acc: PackedVector2Array = PackedVector2Array()
 
 ## --- 雲端/本機生成式 TTS 後端（voicebox 本機 / bailian 雲端）---
 const VoiceboxTTS := preload("res://scripts/voicebox_tts.gd")
@@ -166,6 +168,9 @@ func _ready() -> void:
 	_bp_stt.name = "ByteplusSTT"
 	_bp_stt.recognized.connect(_on_bp_stt_ok)
 	_bp_stt.failed.connect(_on_bp_stt_fail)
+	_bp_stt.utterance.connect(_on_stream_utterance)
+	_bp_stt.session_changed.connect(func(up: bool) -> void:
+		DoroLogger.log("stt_session", {"up": up}))
 	add_child(_bp_stt)
 
 	_bp = ByteplusTTS.new()
@@ -246,6 +251,38 @@ func set_bp_asr_key(k: String) -> void:
 	if _bp_stt != null:
 		_bp_stt.api_key = _bp_asr_key
 func get_bp_asr_key() -> String: return _bp_asr_key
+## 常駐串流:錄音期間音訊持續推送,伺服器 VAD 斷句即時回 utterance
+func is_stt_stream() -> bool:
+	return _stt_stream_enabled and _engine == "byteplus" and _bp_asr_key != ""
+
+func _on_stream_utterance(text: String) -> void:
+	if is_speaking():
+		## Doro 自己講話的回音被辨識出來 → 丟棄
+		DoroLogger.log("stt_echo_dropped", {"text": text.substr(0, 40)})
+		return
+	DoroLogger.log("stt_response", {"engine": "byteplus_stream", "text": text,
+		"latency_ms": 0})
+	transcribed.emit(text)
+
+func _process(_dt: float) -> void:
+	## 串流泵浦:錄音中把 mic buffer 每 ~200ms 推給常駐 ASR session
+	if not _recording or not is_stt_stream() or _bp_stt == null:
+		return
+	if not bool(_bp_stt.call("is_session_up")):
+		return
+	var n: int = _eff.get_frames_available()
+	if n > 0:
+		_stream_acc.append_array(_eff.get_buffer(n))
+	if _stream_acc.size() < int(_sample_rate * 0.2):
+		return
+	var pcm: PackedVector2Array = _resample(_stream_acc, _sample_rate, 16000)
+	_stream_acc = PackedVector2Array()
+	var bytes: PackedByteArray = PackedByteArray()
+	bytes.resize(pcm.size() * 2)
+	for i in pcm.size():
+		bytes.encode_s16(i * 2, int(round(clamp(pcm[i].x, -1.0, 1.0) * 32767.0)))
+	_bp_stt.call("session_push", bytes)
+
 func set_stt_hotwords(s: String) -> void:
 	## 逗號/頓號分隔的熱詞清單
 	var words: PackedStringArray = []
@@ -377,8 +414,11 @@ func start_recording() -> bool:
 		stt_error.emit("沒設 OPENAI_API_KEY（語音轉文字用）")
 		return false
 	_eff.clear_buffer()
+	_stream_acc = PackedVector2Array()
 	_player.play()
 	_recording = true
+	if is_stt_stream() and not bool(_bp_stt.call("is_session_up")):
+		_bp_stt.call("session_start")   ## 常駐 ASR 連線隨錄音開啟
 	recording_started.emit()
 	return true
 
@@ -388,10 +428,16 @@ func abort_recording() -> void:
 	_recording = false
 	_player.stop()
 	_eff.clear_buffer()
+	if _bp_stt != null and bool(_bp_stt.call("is_session_up")):
+		_bp_stt.call("session_stop")   ## 錄音結束就斷 ASR 連線(按時長計費)
 	recording_stopped.emit()
 
 func stop_and_send() -> void:
 	if not _recording:
+		return
+	if is_stt_stream() and bool(_bp_stt.call("is_session_up")):
+		## 串流模式:句子由伺服器 VAD 即時斷,手動送出=結束錄音即可
+		abort_recording()
 		return
 	_recording = false
 	_player.stop()

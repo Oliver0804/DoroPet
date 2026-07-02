@@ -6,6 +6,8 @@ extends Node
 
 signal recognized(text: String)
 signal failed(reason: String)
+signal utterance(text: String)      ## 常駐 session 模式:每句 definite 斷句結果
+signal session_changed(up: bool)    ## 常駐連線建立/斷開
 
 const DoroLogger := preload("res://scripts/logger.gd")
 ## async 雙通道模式:不送 last flag,音訊後補靜音讓 VAD 斷句,
@@ -27,14 +29,70 @@ var _send_pos: int = 0          ## 音訊已送到的 offset(分幀節流送)
 var _deadline_ms: int = 0
 var _drain_deadline_ms: int = 0 ## 靜音送完後的等待上限(空白錄音時 VAD 不會斷句)
 
+## --- 常駐 session(連線保持,音訊持續推送,伺服器 VAD 斷句) ---
+var _session_mode: bool = false
+var _reconnect_at_ms: int = 0   ## 斷線重連的排程時間(0=不重連)
+
 func is_active() -> bool:
 	return _active
 
 func cancel() -> void:
 	_active = false
+	_session_mode = false
+	_reconnect_at_ms = 0
 	if _ws != null:
 		_ws.close()
 		_ws = null
+
+static func _uuid() -> String:
+	return "%08x-%04x-%04x-%04x-%012x" % [
+		randi(), randi() & 0xffff, randi() & 0xffff, randi() & 0xffff,
+		(randi() << 16) | (randi() & 0xffff)]
+
+## ---------- 常駐 session ----------
+func session_start() -> void:
+	cancel()
+	if api_key.strip_edges() == "":
+		failed.emit("未設定 BytePlus API Key")
+		return
+	_session_mode = true
+	_open_session_ws()
+
+func _open_session_ws() -> void:
+	_sent_req = false
+	_got_ack = false
+	_ws = WebSocketPeer.new()
+	_ws.outbound_buffer_size = 4 << 20
+	_ws.inbound_buffer_size = 1 << 20
+	_ws.handshake_headers = PackedStringArray([
+		"X-Api-Key: " + api_key,
+		"X-Api-Resource-Id: " + RESOURCE_ID,
+		"X-Api-Connect-Id: " + _uuid(),
+	])
+	if _ws.connect_to_url(url) != OK:
+		_ws = null
+		_schedule_reconnect()
+		return
+	_active = true
+
+func session_stop() -> void:
+	cancel()
+	session_changed.emit(false)
+
+func is_session_up() -> bool:
+	return _session_mode and _got_ack and _ws != null \
+		and _ws.get_ready_state() == WebSocketPeer.STATE_OPEN
+
+## 持續推 16k s16 mono 的 raw pcm(呼叫端已 resample)
+func session_push(pcm: PackedByteArray) -> void:
+	if not is_session_up() or pcm.is_empty():
+		return
+	_ws.send(_frame(0b0010, 0b0000, 0b0000, pcm), WebSocketPeer.WRITE_MODE_BINARY)
+
+func _schedule_reconnect() -> void:
+	if _session_mode:
+		_reconnect_at_ms = Time.get_ticks_msec() + 1200
+		session_changed.emit(false)
 
 func start(wav: PackedByteArray) -> void:
 	cancel()
@@ -66,10 +124,15 @@ func start(wav: PackedByteArray) -> void:
 	_active = true
 
 func _process(_dt: float) -> void:
+	## session 斷線重連排程
+	if _session_mode and _ws == null and _reconnect_at_ms > 0 \
+			and Time.get_ticks_msec() >= _reconnect_at_ms:
+		_reconnect_at_ms = 0
+		_open_session_ws()
 	if not _active or _ws == null:
 		return
 	_ws.poll()
-	if Time.get_ticks_msec() > _deadline_ms:
+	if not _session_mode and Time.get_ticks_msec() > _deadline_ms:
 		_fail("辨識超時")
 		return
 	match _ws.get_ready_state():
@@ -77,9 +140,9 @@ func _process(_dt: float) -> void:
 			if not _sent_req:
 				_sent_req = true
 				_send_frames()
-			elif _got_ack and _send_pos < _wav.size() + SILENCE_TAIL * 6400:
+			elif not _session_mode and _got_ack and _send_pos < _wav.size() + SILENCE_TAIL * 6400:
 				_send_audio_step()
-			elif _drain_deadline_ms > 0 and Time.get_ticks_msec() > _drain_deadline_ms:
+			elif not _session_mode and _drain_deadline_ms > 0 and Time.get_ticks_msec() > _drain_deadline_ms:
 				_fail("沒辨識到內容")   ## 靜音送完仍無 definite → 大概是空白錄音
 				return
 			while _ws.get_available_packet_count() > 0:
@@ -87,13 +150,19 @@ func _process(_dt: float) -> void:
 				if not _active:
 					return
 		WebSocketPeer.STATE_CLOSING, WebSocketPeer.STATE_CLOSED:
-			## 伺服器回完結果就關線;先把殘留封包撈完再判定失敗
+			## 先把殘留封包撈完
 			while _ws != null and _ws.get_available_packet_count() > 0:
 				_handle_packet(_ws.get_packet())
 				if not _active:
 					return
 			if _ws != null and _ws.get_ready_state() == WebSocketPeer.STATE_CLOSED:
-				_fail("連線被關閉 (code=%d)" % _ws.get_close_code())
+				if _session_mode:
+					## 常駐模式:斷線自動重連
+					_active = false
+					_ws = null
+					_schedule_reconnect()
+				else:
+					_fail("連線被關閉 (code=%d)" % _ws.get_close_code())
 
 func _fail(reason: String) -> void:
 	if not _active:
@@ -122,9 +191,11 @@ static func _frame(msg_type: int, flags: int, serialization: int, payload: Packe
 	return buf
 
 func _send_frames() -> void:
+	## session 模式推的是 raw pcm(無 wav 頭);一次性模式送整個 wav 檔
 	var req: Dictionary = {
 		"user": {"uid": "doropet"},
-		"audio": {"format": "wav", "codec": "raw", "rate": 16000, "bits": 16, "channel": 1},
+		"audio": {"format": "pcm" if _session_mode else "wav",
+			"codec": "raw", "rate": 16000, "bits": 16, "channel": 1},
 		"request": {
 			"model_name": "bigmodel",
 			"output_zh_variant": "tw",
@@ -134,6 +205,7 @@ func _send_frames() -> void:
 			"enable_nonstream": true,     ## 雙通道:VAD 斷句後二次辨識,definite=true
 			"end_window_size": 800,
 			"force_to_speech_time": 1000,
+			"result_type": "single" if _session_mode else "full",   ## 常駐模式取增量,避免舊句累積
 		},
 	}
 	if hotwords.size() > 0:
@@ -186,8 +258,10 @@ func _handle_packet(msg: PackedByteArray) -> void:
 	if mtype != 0b1001:
 		return
 	if not _got_ack:
-		## 第一個 server response = 參數 ack → 之後由 _process 分幀送音訊
+		## 第一個 server response = 參數 ack
 		_got_ack = true
+		if _session_mode:
+			session_changed.emit(true)
 		return
 	var off: int = 4
 	if mflags & 0b0001:
@@ -199,6 +273,7 @@ func _handle_packet(msg: PackedByteArray) -> void:
 	var parsed: Variant = JSON.parse_string(payload.get_string_from_utf8())
 	var text: String = ""
 	var definite: bool = false
+	var def_text: String = ""    ## 本包內 definite 斷句的文字(session 用)
 	if typeof(parsed) == TYPE_DICTIONARY:
 		var res: Variant = (parsed as Dictionary).get("result", {})
 		if typeof(res) == TYPE_DICTIONARY:
@@ -206,6 +281,11 @@ func _handle_packet(msg: PackedByteArray) -> void:
 			for u in (res as Dictionary).get("utterances", []):
 				if typeof(u) == TYPE_DICTIONARY and bool(u.get("definite", false)):
 					definite = true
+					def_text += String(u.get("text", ""))
 	## 雙通道:VAD 斷句後的 definite 結果 = 我們要的最終文字
+	if _session_mode:
+		if def_text.strip_edges() != "":
+			utterance.emit(def_text.strip_edges())
+		return   ## 常駐模式不關線,繼續收下一句
 	if definite or (mflags & 0b0010):
 		_done(text.strip_edges())
