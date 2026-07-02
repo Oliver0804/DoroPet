@@ -22,10 +22,10 @@ const DoroLogger := preload("res://scripts/logger.gd")
 const TYPE_LABELS: Dictionary = {
 	"identity": "身份/稱呼", "project": "工作/專案", "preference": "偏好與要求",
 	"relation": "人際關係", "event": "重要事件", "warning": "警示",
-	"habit": "習慣", "other": "其他",
+	"habit": "習慣", "speech": "主人語癖(口頭禪/常用詞)", "other": "其他",
 }
 const TYPE_ORDER: PackedStringArray = [
-	"identity", "project", "preference", "relation", "warning", "habit", "event", "other"]
+	"identity", "project", "preference", "relation", "warning", "habit", "speech", "event", "other"]
 
 var _facts: Array = []              ## [{id,type,text,created,updated}]
 var _next_id: int = 1
@@ -63,7 +63,11 @@ func memory_section() -> String:
 	var body: String = _render_facts()
 	if body.strip_edges() == "":
 		return ""
-	return "\n\n# 關於主人的記憶(你之前累積的筆記,自然運用,別逐條背誦)\n" + body + "\n"
+	var out: String = "\n\n# 關於主人的記憶(你之前累積的筆記,自然運用,別逐條背誦)\n" + body + "\n"
+	if body.contains("【主人語癖"):
+		out += "(【主人語癖】裡的詞,你可以偶爾自然地學著用——像寵物學主人講話;" \
+			+ "頻率要低、用得順口,別每句都塞)\n"
+	return out
 
 ## 帳本 → 分類條列文字
 func _render_facts() -> String:
@@ -108,8 +112,11 @@ const DISTILL_PROMPT: String = """你是 Doro(桌面寵物)的記憶管理器。
  {"op":"delete","id":<編號>,"reason":"過時/錯誤"}]
 類型限定:identity(身份) project(工作專案) preference(偏好要求)
 relation(人際,名字+關係) event(帶日期事件) warning(警示) habit(穩定習慣)
+speech(主人的口頭禪/常用詞/語尾癖,必須是重複出現多次的)
 規則:
-- 只記值得長期記住的事實;瑣事(單次行為、口頭禪、打招呼方式)不記
+- 只記值得長期記住的事實;瑣事(單次行為、打招呼方式)不記
+- 主人在對話中**重複使用**的口頭禪、常用詞、介係詞習慣 → 記 speech
+  (例:「主打一個X」「媽的」「就是說」;只出現一次的不算)
 - 與既有事實矛盾 → update 該編號;不再成立 → delete
 - 既有帳本已涵蓋 → 不要重複 add;沒有新東西就輸出 []
 - event 的 text 開頭帶日期(今天是 {date})
