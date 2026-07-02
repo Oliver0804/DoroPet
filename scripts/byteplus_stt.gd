@@ -24,6 +24,7 @@ var _sent_req: bool = false
 var _got_ack: bool = false      ## 參數 frame 的 ack 收到後才送音訊
 var _send_pos: int = 0          ## 音訊已送到的 offset(分幀節流送)
 var _deadline_ms: int = 0
+var _drain_deadline_ms: int = 0 ## 靜音送完後的等待上限(空白錄音時 VAD 不會斷句)
 
 func is_active() -> bool:
 	return _active
@@ -43,6 +44,7 @@ func start(wav: PackedByteArray) -> void:
 	_sent_req = false
 	_got_ack = false
 	_send_pos = 0
+	_drain_deadline_ms = 0
 	_deadline_ms = Time.get_ticks_msec() + TIMEOUT_MS
 	_ws = WebSocketPeer.new()
 	## 預設 outbound buffer 只有 64KB,長錄音一包會塞不下 → 加大 + 分塊送
@@ -76,6 +78,9 @@ func _process(_dt: float) -> void:
 				_send_frames()
 			elif _got_ack and _send_pos < _wav.size() + SILENCE_TAIL * 6400:
 				_send_audio_step()
+			elif _drain_deadline_ms > 0 and Time.get_ticks_msec() > _drain_deadline_ms:
+				_fail("沒辨識到內容")   ## 靜音送完仍無 definite → 大概是空白錄音
+				return
 			while _ws.get_available_packet_count() > 0:
 				_handle_packet(_ws.get_packet())
 				if not _active:
@@ -154,6 +159,8 @@ func _send_audio_step() -> void:
 			_fail("送音訊失敗 (err=%d, offset=%d)" % [err, _send_pos])
 			return
 		_send_pos += chunk.size()
+		if _send_pos >= _wav.size() + SILENCE_TAIL * 6400:
+			_drain_deadline_ms = Time.get_ticks_msec() + 2500
 
 func _handle_packet(msg: PackedByteArray) -> void:
 	if msg.size() < 8:

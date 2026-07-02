@@ -6,6 +6,7 @@ signal logs_requested
 
 ## 由 pet.gd 在 open() 時帶入當前值
 var _initial: Dictionary = {}
+var _loading: bool = false   ## open() 填值期間抑制 _emit,避免半成品狀態被存檔
 
 var _model_path_edit: LineEdit
 var _model_path_btn: Button
@@ -131,6 +132,7 @@ func _ready() -> void:
 	_build_ui()
 
 func open(initial: Dictionary, chat_status: String, voice_status: String = "") -> void:
+	_loading = true
 	_initial = initial.duplicate()
 	_model_path_edit.text = initial.get("model_path", "res://assets/doro/Doro.model3.json")
 	_scale_slider.value = initial.get("scale", 0.25)
@@ -200,6 +202,7 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 	_continuous_timeout_spin.value = float(initial.get("continuous_timeout_sec", 15.0))
 	_update_vad_threshold_label(_vad_threshold_slider.value)
 	_update_scale_label(_scale_slider.value)
+	_loading = false
 	popup_centered()
 
 func _build_ui() -> void:
@@ -934,6 +937,8 @@ func _on_persona_changed() -> void:
 	_emit()
 
 func _emit() -> void:
+	if _loading:
+		return   ## open() 填值觸發的信號一律忽略
 	settings_changed.emit(_collect())
 
 func _collect() -> Dictionary:
