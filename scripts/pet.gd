@@ -124,6 +124,7 @@ var _continuous_voice: bool = true
 var _continuous_timeout_sec: float = 15.0
 var _settings: Window                      ## SettingsDialog 實例
 var _last_input_voice: bool = false        ## 最近一次輸入是否來自語音（決定要不要朗讀回覆）
+var _pending_bubble_text: String = ""      ## TTS 生成中先壓著的回覆文字，開播才顯示
 var _last_mouse_pos: Vector2 = Vector2.ZERO
 var _mouse_idle_time: float = 0.0
 const IDLE_TRIGGER_SEC: float = 3.0        ## 多久沒動進入 idle
@@ -793,6 +794,7 @@ func _build_chat_ui() -> void:
 	_voice.connect("stt_error", _on_voice_error)
 	_voice.connect("recording_started", _on_recording_started)
 	_voice.connect("recording_stopped", _on_recording_stopped)
+	_voice.connect("speaking_started", _on_tts_started)
 	_voice.connect("speaking_finished", _on_tts_finished)
 
 	var v_engine: String = _config_get("voice", "engine", "local")
@@ -810,6 +812,14 @@ func _build_chat_ui() -> void:
 	var v_voice: String = _config_get("voice", "tts_voice", "")
 	if v_voice != "": _voice.call("set_voice", v_voice)
 	_voice.call("set_tts_enabled", _config_get("voice", "tts_enabled", true))
+	_voice.call("set_tts_backend", _config_get("voice", "tts_backend", "system"))
+	_voice.call("set_vb_endpoint", _config_get("voice", "vb_endpoint", ""))
+	_voice.call("set_vb_profile", _config_get("voice", "vb_profile", ""))
+	_voice.call("set_vb_model_size", _config_get("voice", "vb_model_size", "0.6B"))
+	_voice.call("set_bl_endpoint", _config_get("voice", "bl_endpoint", ""))
+	_voice.call("set_bl_api_key", _config_get("voice", "bl_api_key", ""))
+	_voice.call("set_bl_model", _config_get("voice", "bl_model", ""))
+	_voice.call("set_bl_voice", _config_get("voice", "bl_voice", ""))
 
 	## 錄音指示由 bubble 顯示（不再需要獨立 Label）
 
@@ -1003,16 +1013,33 @@ func _start_input_idle_timer() -> void:
 func _on_chat_reply(text: String, emotion: int) -> void:
 	_end_thinking()
 	_set_emotion(emotion)
-	## 若 TTS 啟用:bubble 保持顯示直到 TTS 念完(再延長 _bubble_seconds)
+	## 若 TTS 啟用:文字先壓著,等第一段語音真的開始播才顯示(跟聲音同步;
+	## voicebox 生成要好幾秒)。保底 30 秒:生成掛了也要把字亮出來
 	if _voice and _voice.call("is_tts_enabled"):
-		_show_bubble(text, 999.0)
+		_pending_bubble_text = text
+		_show_bubble("🎙 Doro 醞釀聲音中…", 999.0)
 		_voice.call("speak", text)
+		var guard: String = text
+		get_tree().create_timer(30.0).timeout.connect(func() -> void:
+			if _pending_bubble_text == guard:
+				_reveal_pending_bubble(999.0))
 	else:
 		_show_bubble(text, _bubble_seconds)
 		## TTS 關閉:沒 speaking_finished signal → 手動觸發連續流程
 		_on_tts_finished()
 
+func _on_tts_started() -> void:
+	_reveal_pending_bubble(999.0)   ## 開始講了 → 文字亮出來,停到講完
+
+func _reveal_pending_bubble(seconds: float) -> void:
+	if _pending_bubble_text == "":
+		return
+	_show_bubble(_pending_bubble_text, seconds)
+	_pending_bubble_text = ""
+
 func _on_tts_finished() -> void:
+	## TTS 沒真的播出來(生成失敗/平台不支援)→ 這裡保底把字亮出來
+	_reveal_pending_bubble(_bubble_seconds)
 	## TTS 念完後 bubble 再停留 user 設的秒數
 	if _bubble_window != null and _bubble_window.visible and not _recording_ui:
 		_bubble_timer.stop()
@@ -1221,6 +1248,14 @@ func _open_settings() -> void:
 		"voice_local_model": _voice.call("get_local_model") if _voice else "",
 		"tts_voice": _voice.call("get_voice") if _voice else "Mei-Jia",
 		"tts_enabled": _voice.call("is_tts_enabled") if _voice else true,
+		"tts_backend": _voice.call("get_tts_backend") if _voice else "system",
+		"vb_endpoint": _voice.call("get_vb_endpoint") if _voice else "",
+		"vb_profile": _voice.call("get_vb_profile") if _voice else "",
+		"vb_model_size": _voice.call("get_vb_model_size") if _voice else "0.6B",
+		"bl_endpoint": _voice.call("get_bl_endpoint") if _voice else "",
+		"bl_api_key": _voice.call("get_bl_api_key") if _voice else "",
+		"bl_model": _voice.call("get_bl_model") if _voice else "",
+		"bl_voice": _voice.call("get_bl_voice") if _voice else "",
 		"hotkey_keycode": _hotkey_keycode,
 		"hotkey_mods": _hotkey_mods,
 		"vad_enabled": _vad_enabled,
@@ -1303,6 +1338,14 @@ func _on_settings_changed(data: Dictionary) -> void:
 		_voice.call("set_local_model", data.get("voice_local_model", ""))
 		_voice.call("set_voice", data.get("tts_voice", "Mei-Jia"))
 		_voice.call("set_tts_enabled", bool(data.get("tts_enabled", true)))
+		_voice.call("set_tts_backend", data.get("tts_backend", "system"))
+		_voice.call("set_vb_endpoint", data.get("vb_endpoint", ""))
+		_voice.call("set_vb_profile", data.get("vb_profile", ""))
+		_voice.call("set_vb_model_size", data.get("vb_model_size", "0.6B"))
+		_voice.call("set_bl_endpoint", data.get("bl_endpoint", ""))
+		_voice.call("set_bl_api_key", data.get("bl_api_key", ""))
+		_voice.call("set_bl_model", data.get("bl_model", ""))
+		_voice.call("set_bl_voice", data.get("bl_voice", ""))
 	_save_config()
 
 ## ---------- 設定持久化 ----------
@@ -1380,4 +1423,12 @@ func _save_config() -> void:
 		cfg.set_value("voice", "local_model", _voice.call("get_local_model"))
 		cfg.set_value("voice", "tts_voice", _voice.call("get_voice"))
 		cfg.set_value("voice", "tts_enabled", _voice.call("is_tts_enabled"))
+		cfg.set_value("voice", "tts_backend", _voice.call("get_tts_backend"))
+		cfg.set_value("voice", "vb_endpoint", _voice.call("get_vb_endpoint"))
+		cfg.set_value("voice", "vb_profile", _voice.call("get_vb_profile"))
+		cfg.set_value("voice", "vb_model_size", _voice.call("get_vb_model_size"))
+		cfg.set_value("voice", "bl_endpoint", _voice.call("get_bl_endpoint"))
+		cfg.set_value("voice", "bl_api_key", _voice.call("get_bl_api_key"))
+		cfg.set_value("voice", "bl_model", _voice.call("get_bl_model"))
+		cfg.set_value("voice", "bl_voice", _voice.call("get_bl_voice"))
 	cfg.save(CONFIG_PATH)

@@ -36,6 +36,17 @@ const TMP_TTS_PATH: String = "user://doro_tts.wav"
 var _recording: bool = false
 var _sample_rate: int = 0
 
+## --- 雲端/本機生成式 TTS 後端（voicebox 本機 / bailian 雲端）---
+const VoiceboxTTS := preload("res://scripts/voicebox_tts.gd")
+const BailianTTS := preload("res://scripts/bailian_tts.gd")
+var _tts_backend: String = "system"      ## "system"(say/PowerShell) | "voicebox" | "bailian"
+var _vb: Node
+var _bl: Node
+var _vb_queue: Array[String] = []        ## 已生成待播的 wav（user:// 路徑，兩後端共用）
+var _vb_generating: bool = false
+var _vb_started_emitted: bool = false
+var _vb_pending_text: String = ""        ## 生成掛掉時 fallback 系統 TTS 用
+
 var _engine: String = "local"        ## "local" | "api"
 var _api_key: String = ""
 var _endpoint: String = DEFAULT_STT_ENDPOINT
@@ -116,9 +127,22 @@ func _ready() -> void:
 	_tts_spectrum = AudioServer.get_bus_effect_instance(_tts_bus_idx, 0) as AudioEffectSpectrumAnalyzerInstance
 	_tts_player = AudioStreamPlayer.new()
 	_tts_player.bus = "TTSBus"
-	_tts_player.finished.connect(func() -> void:
-		speaking_finished.emit())
+	_tts_player.finished.connect(_on_player_finished)
 	add_child(_tts_player)
+
+	_vb = VoiceboxTTS.new()
+	_vb.name = "VoiceboxTTS"
+	_vb.chunk_ready.connect(_on_vb_chunk_ready)
+	_vb.finished_generating.connect(_on_vb_finished_generating)
+	_vb.failed_first.connect(_on_vb_failed_first)
+	add_child(_vb)
+
+	_bl = BailianTTS.new()
+	_bl.name = "BailianTTS"
+	_bl.chunk_ready.connect(_on_vb_chunk_ready)
+	_bl.finished_generating.connect(_on_vb_finished_generating)
+	_bl.failed_first.connect(_on_vb_failed_first)
+	add_child(_bl)
 
 ## ---------- runtime 設定 ----------
 func set_engine(e: String) -> void:
@@ -145,6 +169,28 @@ func set_voice(v: String) -> void:
 func get_voice() -> String: return _voice
 func set_tts_enabled(b: bool) -> void: _tts_enabled = b
 func is_tts_enabled() -> bool: return _tts_enabled
+
+func set_tts_backend(b: String) -> void:
+	if b == "system" or b == "voicebox" or b == "bailian":
+		_tts_backend = b
+func get_tts_backend() -> String: return _tts_backend
+func set_vb_endpoint(e: String) -> void:
+	_vb.endpoint = e.rstrip("/") if e.strip_edges() != "" else "http://127.0.0.1:17493"
+func get_vb_endpoint() -> String: return _vb.endpoint
+func set_vb_profile(p: String) -> void: _vb.profile_name = p
+func get_vb_profile() -> String: return _vb.profile_name
+func set_vb_model_size(m: String) -> void:
+	_vb.model_size = m if m.strip_edges() != "" else "0.6B"
+func get_vb_model_size() -> String: return _vb.model_size
+func set_bl_endpoint(e: String) -> void: _bl.endpoint = e.strip_edges().rstrip("/")
+func get_bl_endpoint() -> String: return _bl.endpoint
+func set_bl_api_key(k: String) -> void: _bl.api_key = k.strip_edges()
+func get_bl_api_key() -> String: return _bl.api_key
+func set_bl_model(m: String) -> void:
+	_bl.model = m if m.strip_edges() != "" else "qwen3-tts-vc-2026-01-22"
+func get_bl_model() -> String: return _bl.model
+func set_bl_voice(v: String) -> void: _bl.voice = v.strip_edges()
+func get_bl_voice() -> String: return _bl.voice
 
 func is_recording() -> bool: return _recording
 
@@ -407,11 +453,65 @@ func _on_stt_response(result: int, code: int, _h: PackedStringArray, body: Packe
 func speak(text: String) -> void:
 	if not _tts_enabled or text.strip_edges() == "":
 		return
+	stop_speaking()
+	if _tts_backend == "voicebox" or _tts_backend == "bailian":
+		_vb_pending_text = text
+		_vb_generating = true
+		_vb_started_emitted = false
+		var gen: Node = _vb if _tts_backend == "voicebox" else _bl
+		gen.call("start", text)
+		return
+	_speak_system(text)
+
+func _speak_system(text: String) -> void:
 	if OS.get_name() != "macOS" and OS.get_name() != "Windows":
 		return
-	stop_speaking()
 	var t: Thread = Thread.new()
 	t.start(_tts_thread.bind(text, _voice))
+
+## ---------- Voicebox 佇列播放 ----------
+func _on_vb_chunk_ready(path: String, _idx: int) -> void:
+	_vb_queue.append(path)
+	if not _tts_player.playing:
+		_play_next_vb()
+
+func _on_vb_finished_generating(_ok_count: int) -> void:
+	_vb_generating = false
+	## 全生成完且播完 → 收工（邊播邊生成時由 _on_player_finished 收）
+	if _vb_queue.is_empty() and not _tts_player.playing:
+		_finish_speaking()
+
+func _on_vb_failed_first(reason: String) -> void:
+	## 第一段就失敗（多半是 Voicebox 沒開）→ fallback 系統 TTS
+	_vb_generating = false
+	_vb_queue.clear()
+	DoroLogger.log("tts_vb_fallback", {"reason": reason})
+	_speak_system(_vb_pending_text)
+
+func _play_next_vb() -> void:
+	while not _vb_queue.is_empty():
+		var path: String = _vb_queue.pop_front()
+		var stream: AudioStreamWAV = _load_wav_as_stream(ProjectSettings.globalize_path(path))
+		if stream == null:
+			continue
+		_tts_player.stream = stream
+		_tts_player.play()
+		if not _vb_started_emitted:
+			_vb_started_emitted = true
+			speaking_started.emit()
+		return
+	## 佇列空了；若也不再生成 → 收工
+	if not _vb_generating:
+		_finish_speaking()
+
+func _on_player_finished() -> void:
+	if _tts_backend != "system" and (_vb_generating or not _vb_queue.is_empty()):
+		_play_next_vb()
+		return
+	_finish_speaking()
+
+func _finish_speaking() -> void:
+	speaking_finished.emit()
 
 func _tts_thread(text: String, voice: String) -> void:
 	var tmp: String = ProjectSettings.globalize_path(TMP_TTS_PATH)
@@ -457,19 +557,25 @@ func _load_wav_as_stream(path: String) -> AudioStreamWAV:
 	f.close()
 	if data.size() < 44:
 		return null
+	## 先掃 fmt chunk 拿實際取樣率/聲道（say 是 22050、voicebox 是 24000）
+	var sr: int = TTS_SR
+	var channels: int = 1
 	var i: int = 12
 	while i < data.size() - 8:
 		var chunk_id: String = data.slice(i, i + 4).get_string_from_ascii()
 		var chunk_size: int = data.decode_u32(i + 4)
-		if chunk_id == "data":
+		if chunk_id == "fmt " and chunk_size >= 16:
+			channels = data.decode_u16(i + 10)
+			sr = data.decode_u32(i + 12)
+		elif chunk_id == "data":
 			var pcm: PackedByteArray = data.slice(i + 8, i + 8 + chunk_size)
 			var s: AudioStreamWAV = AudioStreamWAV.new()
 			s.format = AudioStreamWAV.FORMAT_16_BITS
-			s.mix_rate = TTS_SR
-			s.stereo = false
+			s.mix_rate = sr
+			s.stereo = channels >= 2
 			s.data = pcm
 			return s
-		i += 8 + chunk_size
+		i += 8 + chunk_size + (chunk_size & 1)   ## RIFF chunk 奇數長度會補 1 byte
 	return null
 
 ## 給 pet.gd 用：當前 TTS 音訊在人聲頻段的能量 (0..1)
@@ -482,9 +588,17 @@ func get_tts_mouth_level() -> float:
 	return clamp(mag.length() * 36.0, 0.0, 1.0)
 
 func is_speaking() -> bool:
-	return _tts_player != null and _tts_player.playing
+	if _tts_player != null and _tts_player.playing:
+		return true
+	return _vb_generating or not _vb_queue.is_empty()
 
 func stop_speaking() -> void:
+	if _vb != null:
+		_vb.call("cancel")
+	if _bl != null:
+		_bl.call("cancel")
+	_vb_generating = false
+	_vb_queue.clear()
 	if _tts_player != null and _tts_player.playing:
 		_tts_player.stop()
 

@@ -47,6 +47,24 @@ var _voice_local_model: LineEdit
 var _tts_voice: OptionButton
 var _tts_enabled: CheckBox
 var _voice_status: Label
+
+## TTS 後端（系統內建 / Voicebox）
+var _tts_backend_sel: OptionButton
+var _vb_endpoint: LineEdit
+var _vb_profile: OptionButton
+var _vb_model_size: OptionButton
+var _vb_status: Label
+var _vb_http: HTTPRequest                ## 抓 /profiles 用
+var _vb_saved_profile: String = ""       ## 抓不到清單時保留原設定
+var _tts_system_rows: Array[Control] = []
+var _tts_vb_rows: Array[Control] = []
+
+## 百炼雲端 TTS
+var _bl_endpoint: LineEdit
+var _bl_api_key: LineEdit
+var _bl_model: LineEdit
+var _bl_voice: LineEdit
+var _tts_bl_rows: Array[Control] = []
 var _voice_node: Node                    ## 直接拿到 VoiceClient 來查裝置 / 測試
 var _mic_device: OptionButton
 var _mic_test_btn: Button
@@ -124,6 +142,19 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 		if _tts_voice.get_item_text(i) == v:
 			_tts_voice.select(i)
 			break
+	var backend: String = String(initial.get("tts_backend", "system"))
+	_tts_backend_sel.select(2 if backend == "bailian" else (1 if backend == "voicebox" else 0))
+	_bl_endpoint.text = String(initial.get("bl_endpoint", ""))
+	_bl_api_key.text = String(initial.get("bl_api_key", ""))
+	_bl_model.text = String(initial.get("bl_model", ""))
+	_bl_voice.text = String(initial.get("bl_voice", ""))
+	_vb_endpoint.text = String(initial.get("vb_endpoint", ""))
+	_vb_saved_profile = String(initial.get("vb_profile", ""))
+	var msize: String = String(initial.get("vb_model_size", "0.6B"))
+	_vb_model_size.select(clampi(VB_MODEL_SIZES.find(msize), 0, VB_MODEL_SIZES.size() - 1))
+	_update_tts_visibility()
+	if backend == "voicebox":
+		_refresh_vb_profiles()
 	_voice_status.text = "Whisper: " + voice_status
 	_hotkey_keycode = int(initial.get("hotkey_keycode", KEY_SPACE))
 	_hotkey_mods = int(initial.get("hotkey_mods", 0))
@@ -574,6 +605,21 @@ func _build_ui() -> void:
 	_tts_enabled.toggled.connect(_on_any_toggled)
 	vb.add_child(_tts_enabled)
 
+	## TTS 後端選擇
+	var be_row: HBoxContainer = HBoxContainer.new()
+	var be_cap: Label = Label.new()
+	be_cap.text = "TTS 引擎"
+	be_cap.custom_minimum_size = Vector2(90, 0)
+	_tts_backend_sel = OptionButton.new()
+	_tts_backend_sel.add_item("系統內建（快、音色普通）")     ## 0 = system
+	_tts_backend_sel.add_item("Voicebox（本機、克隆音色）")   ## 1 = voicebox
+	_tts_backend_sel.add_item("百炼雲端（快、克隆音色、要網路）")  ## 2 = bailian
+	_tts_backend_sel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_tts_backend_sel.item_selected.connect(_on_tts_backend_changed)
+	be_row.add_child(be_cap)
+	be_row.add_child(_tts_backend_sel)
+	vb.add_child(be_row)
+
 	var voice_row: HBoxContainer = HBoxContainer.new()
 	var voice_cap: Label = Label.new()
 	voice_cap.text = "聲音"
@@ -588,6 +634,92 @@ func _build_ui() -> void:
 	voice_row.add_child(voice_cap)
 	voice_row.add_child(_tts_voice)
 	vb.add_child(voice_row)
+	_tts_system_rows.append(voice_row)
+
+	## --- Voicebox 配置（選 Voicebox 時才顯示）---
+	var vbep_row: HBoxContainer = HBoxContainer.new()
+	var vbep_cap: Label = Label.new()
+	vbep_cap.text = "Endpoint"
+	vbep_cap.custom_minimum_size = Vector2(90, 0)
+	_vb_endpoint = LineEdit.new()
+	_vb_endpoint.placeholder_text = "http://127.0.0.1:17493"
+	_vb_endpoint.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_vb_endpoint.text_changed.connect(_on_text_changed)
+	vbep_row.add_child(vbep_cap)
+	vbep_row.add_child(_vb_endpoint)
+	vb.add_child(vbep_row)
+	_tts_vb_rows.append(vbep_row)
+
+	var vbp_row: HBoxContainer = HBoxContainer.new()
+	var vbp_cap: Label = Label.new()
+	vbp_cap.text = "Profile"
+	vbp_cap.custom_minimum_size = Vector2(90, 0)
+	_vb_profile = OptionButton.new()
+	_vb_profile.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_vb_profile.item_selected.connect(_on_vb_profile_selected)
+	var vbp_btn: Button = Button.new()
+	vbp_btn.text = "↻"
+	vbp_btn.tooltip_text = "重新抓 Voicebox profile 清單"
+	vbp_btn.pressed.connect(_refresh_vb_profiles)
+	vbp_row.add_child(vbp_cap)
+	vbp_row.add_child(_vb_profile)
+	vbp_row.add_child(vbp_btn)
+	vb.add_child(vbp_row)
+	_tts_vb_rows.append(vbp_row)
+
+	var vbm_row: HBoxContainer = HBoxContainer.new()
+	var vbm_cap: Label = Label.new()
+	vbm_cap.text = "模型大小"
+	vbm_cap.custom_minimum_size = Vector2(90, 0)
+	_vb_model_size = OptionButton.new()
+	_vb_model_size.add_item("0.6B（快）")
+	_vb_model_size.add_item("1.7B（慢、細膩）")
+	_vb_model_size.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_vb_model_size.item_selected.connect(func(_i: int) -> void: _emit())
+	vbm_row.add_child(vbm_cap)
+	vbm_row.add_child(_vb_model_size)
+	vb.add_child(vbm_row)
+	_tts_vb_rows.append(vbm_row)
+
+	_vb_status = Label.new()
+	_vb_status.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
+	_vb_status.add_theme_font_size_override("font_size", 12)
+	vb.add_child(_vb_status)
+	_tts_vb_rows.append(_vb_status)
+
+	## --- 百炼雲端配置（選百炼時才顯示）---
+	var bl_defs: Array = [
+		["Endpoint", "https://{WorkspaceId}.ap-southeast-1.maas.aliyuncs.com", false],
+		["API Key", "sk-ws-...（workspace 專屬 key）", true],
+		["合成模型", "qwen3-tts-vc-2026-01-22", false],
+		["Voice ID", "qwen-tts-vc-...（音色 ID）", false],
+	]
+	var bl_edits: Array[LineEdit] = []
+	for d in bl_defs:
+		var row: HBoxContainer = HBoxContainer.new()
+		var cap: Label = Label.new()
+		cap.text = d[0]
+		cap.custom_minimum_size = Vector2(90, 0)
+		var edit: LineEdit = LineEdit.new()
+		edit.placeholder_text = d[1]
+		edit.secret = d[2]
+		edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		edit.text_changed.connect(_on_text_changed)
+		row.add_child(cap)
+		row.add_child(edit)
+		vb.add_child(row)
+		_tts_bl_rows.append(row)
+		bl_edits.append(edit)
+	_bl_endpoint = bl_edits[0]
+	_bl_api_key = bl_edits[1]
+	_bl_model = bl_edits[2]
+	_bl_voice = bl_edits[3]
+
+	_vb_http = HTTPRequest.new()
+	_vb_http.timeout = 5.0
+	_vb_http.request_completed.connect(_on_vb_profiles_response)
+	add_child(_vb_http)
+	_update_tts_visibility()
 
 	## 底部按鈕在 outer（scroll 外），永遠看得到
 	var sep_bot: HSeparator = HSeparator.new()
@@ -710,6 +842,14 @@ func _collect() -> Dictionary:
 		"voice_local_model": _voice_local_model.text,
 		"tts_voice": tts_v,
 		"tts_enabled": _tts_enabled.button_pressed,
+		"tts_backend": ["system", "voicebox", "bailian"][maxi(0, _tts_backend_sel.selected)],
+		"vb_endpoint": _vb_endpoint.text,
+		"vb_profile": _vb_saved_profile,
+		"vb_model_size": VB_MODEL_SIZES[maxi(0, _vb_model_size.selected)],
+		"bl_endpoint": _bl_endpoint.text,
+		"bl_api_key": _bl_api_key.text,
+		"bl_model": _bl_model.text,
+		"bl_voice": _bl_voice.text,
 		"hotkey_keycode": _hotkey_keycode,
 		"hotkey_mods": _hotkey_mods,
 		"vad_enabled": _vad_check.button_pressed,
@@ -757,6 +897,69 @@ func _on_close() -> void:
 		_mic_test_btn.button_pressed = false
 	_emit()
 	hide()
+
+## ---------- TTS 後端切換 / Voicebox profiles ----------
+const VB_MODEL_SIZES: Array = ["0.6B", "1.7B"]
+
+func _on_tts_backend_changed(_i: int) -> void:
+	_update_tts_visibility()
+	if _tts_backend_sel.selected == 1 and _vb_profile.item_count == 0:
+		_refresh_vb_profiles()
+	_emit()
+
+func _update_tts_visibility() -> void:
+	var sel: int = _tts_backend_sel.selected if _tts_backend_sel != null else 0
+	for r in _tts_system_rows:
+		r.visible = sel == 0
+	for r in _tts_vb_rows:
+		r.visible = sel == 1
+	for r in _tts_bl_rows:
+		r.visible = sel == 2
+
+func _vb_endpoint_or_default() -> String:
+	var e: String = _vb_endpoint.text.strip_edges()
+	return e.rstrip("/") if e != "" else "http://127.0.0.1:17493"
+
+func _refresh_vb_profiles() -> void:
+	_vb_status.text = "抓取 profile 清單中…"
+	_vb_http.cancel_request()
+	var err: int = _vb_http.request(
+		_vb_endpoint_or_default() + "/profiles",
+		PackedStringArray(["X-Voicebox-Client-Id: doropet"]))
+	if err != OK:
+		_vb_status.text = "連不上 Voicebox，請確認 app 有開"
+
+func _on_vb_profiles_response(result: int, code: int, _h: PackedStringArray, body: PackedByteArray) -> void:
+	if result != HTTPRequest.RESULT_SUCCESS or code < 200 or code >= 300:
+		_vb_status.text = "連不上 Voicebox（%s）— 沿用「%s」" % [_vb_endpoint_or_default(), _vb_saved_profile]
+		_set_vb_profile_items([_vb_saved_profile] if _vb_saved_profile != "" else [])
+		return
+	var parsed: Variant = JSON.parse_string(body.get_string_from_utf8())
+	var items: Array = parsed if typeof(parsed) == TYPE_ARRAY else []
+	var names: Array = []
+	for p in items:
+		if typeof(p) == TYPE_DICTIONARY and String(p.get("name", "")) != "":
+			names.append(String(p.get("name", "")))
+	if names.is_empty():
+		_vb_status.text = "Voicebox 內沒有 profile，先去 app 建一個聲音"
+	else:
+		_vb_status.text = "Voicebox 連線 OK（%d 個 profile）" % names.size()
+	_set_vb_profile_items(names)
+
+func _set_vb_profile_items(names: Array) -> void:
+	_vb_profile.clear()
+	var sel: int = 0
+	for i in names.size():
+		_vb_profile.add_item(String(names[i]))
+		if names[i] == _vb_saved_profile:
+			sel = i
+	if _vb_profile.item_count > 0:
+		_vb_profile.select(sel)
+		_vb_saved_profile = _vb_profile.get_item_text(sel)
+
+func _on_vb_profile_selected(idx: int) -> void:
+	_vb_saved_profile = _vb_profile.get_item_text(idx)
+	_emit()
 
 ## ---------- STT 引擎切換 ----------
 func _on_voice_engine_changed(_i: int) -> void:
