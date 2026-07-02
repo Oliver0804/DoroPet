@@ -30,12 +30,11 @@ const MODEL_PRESETS: Array = [
 	{"label": "—— 自訂 ——", "value": ""},
 	{"label": "ByteDance Seed 2.0 mini(預設・支援視覺)", "value": "bytedance-seed/seed-2.0-mini"},
 	{"label": "ByteDance Seed 1.6 Flash", "value": "bytedance-seed/seed-1.6-flash"},
-	{"label": "Gemini 2.5 Flash(免費・支援視覺)", "value": "google/gemini-2.5-flash-image-preview:free"},
-	{"label": "Gemini 2.0 Flash Exp(免費・支援視覺)", "value": "google/gemini-2.0-flash-exp:free"},
-	{"label": "DeepSeek Chat v3.1(免費・純文字)", "value": "deepseek/deepseek-chat-v3.1:free"},
+	{"label": "Gemini 2.5 Flash Lite(超便宜・快・視覺)", "value": "google/gemini-2.5-flash-lite"},
+	{"label": "Gemini 2.5 Flash(穩・支援視覺)", "value": "google/gemini-2.5-flash"},
+	{"label": "DeepSeek Chat v3.1(便宜・中文強)", "value": "deepseek/deepseek-chat-v3.1"},
 	{"label": "Llama 3.3 70B(免費・純文字)", "value": "meta-llama/llama-3.3-70b-instruct:free"},
-	{"label": "Qwen 2.5 72B(免費・純文字)", "value": "qwen/qwen-2.5-72b-instruct:free"},
-	{"label": "Claude 3.5 Haiku(付費・很穩)", "value": "anthropic/claude-3.5-haiku"},
+	{"label": "Claude Haiku 4.5(付費・很穩・視覺)", "value": "anthropic/claude-haiku-4.5"},
 	{"label": "GPT-4o mini(付費・支援視覺)", "value": "openai/gpt-4o-mini"},
 ]
 
