@@ -249,6 +249,39 @@ func get_bp_asr_key() -> String: return _bp_asr_key
 
 func is_recording() -> bool: return _recording
 
+## ---------- 系統聲音輸入(loopback) ----------
+var _capture_system_audio: bool = false
+var _mic_device_backup: String = ""   ## 開啟前的麥克風,關閉時還原
+
+## 找系統上的 loopback 虛擬裝置(BlackHole / Soundflower / Background Music 等)
+func find_loopback_device() -> String:
+	for d in AudioServer.get_input_device_list():
+		var low: String = String(d).to_lower()
+		for key in ["blackhole", "loopback", "soundflower", "background music", "aggregate", "聚集"]:
+			if low.contains(key):
+				return d
+	return ""
+
+func set_capture_system_audio(b: bool) -> void:
+	if b == _capture_system_audio:
+		return
+	_capture_system_audio = b
+	if b:
+		var loop_dev: String = find_loopback_device()
+		if loop_dev == "":
+			_capture_system_audio = false   ## 沒裝虛擬裝置,不硬切
+			return
+		_mic_device_backup = AudioServer.input_device
+		AudioServer.input_device = loop_dev
+	else:
+		if _mic_device_backup != "":
+			AudioServer.input_device = _mic_device_backup
+		else:
+			AudioServer.input_device = "Default"
+
+func is_capture_system_audio() -> bool:
+	return _capture_system_audio
+
 ## ---------- 麥克風裝置 ----------
 func list_input_devices() -> Array:
 	return AudioServer.get_input_device_list()

@@ -83,6 +83,7 @@ var _voice_node: Node                    ## 直接拿到 VoiceClient 來查裝�
 var _mic_device: OptionButton
 var _mic_test_btn: Button
 var _mic_test_bar: ProgressBar
+var _sys_audio_check: CheckBox
 
 ## 熱鍵
 var _hotkey_btn: Button
@@ -153,6 +154,7 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 	_voice_model.text = initial.get("voice_model", "whisper-1")
 	_voice_local_bin.text = initial.get("voice_local_bin", "")
 	_voice_local_model.text = initial.get("voice_local_model", "")
+	_sys_audio_check.button_pressed = bool(initial.get("capture_system_audio", false))
 	var eng: String = initial.get("voice_engine", "local")
 	_voice_engine.select(maxi(0, STT_ENGINES.find(eng)))
 	_stt_bp_key.text = String(initial.get("bp_asr_key", ""))
@@ -539,6 +541,13 @@ func _build_ui() -> void:
 	dev_row.add_child(dev_cap)
 	dev_row.add_child(_mic_device)
 	vb.add_child(dev_row)
+
+	## 聆聽系統聲音(loopback,取代麥克風)
+	_sys_audio_check = CheckBox.new()
+	_sys_audio_check.text = "🔈 聆聽系統聲音(需 BlackHole 等虛擬裝置,會取代麥克風)"
+	_sys_audio_check.tooltip_text = "把輸入切到 loopback 裝置,Doro 聽到的是電腦正在播的聲音;注意牠也會聽到自己講話"
+	_sys_audio_check.toggled.connect(_on_sys_audio_toggled)
+	vb.add_child(_sys_audio_check)
 
 	var test_row: HBoxContainer = HBoxContainer.new()
 	var test_cap: Label = Label.new()
@@ -960,6 +969,7 @@ func _collect() -> Dictionary:
 		"persona": _persona_edit.text,
 		"voice_engine": STT_ENGINES[maxi(0, _voice_engine.selected)],
 		"bp_asr_key": _stt_bp_key.text,
+		"capture_system_audio": _sys_audio_check.button_pressed,
 		"voice_api_key": _voice_api_key.text,
 		"voice_endpoint": _voice_endpoint.text,
 		"voice_model": _voice_model.text,
@@ -1181,6 +1191,11 @@ func _refresh_devices() -> void:
 	else:
 		_mic_device.disabled = false
 		_mic_device.select(sel)
+
+func _on_sys_audio_toggled(_b: bool) -> void:
+	_emit()
+	## 套用後重抓裝置下拉,反映實際切到的裝置
+	call_deferred("_refresh_devices")
 
 func _on_device_selected(idx: int) -> void:
 	if _voice_node == null:
