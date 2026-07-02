@@ -74,6 +74,9 @@ var _vad_threshold: float = 0.02           ## RMS 門檻：> 視為有聲
 var _vad_silence_sec: float = 1.2          ## 持續沉默幾秒 → 自動送出
 var _vad_has_spoken: bool = false          ## 本次錄音內是否說過話
 var _vad_silence_t: float = 0.0
+var _barge_t: float = 0.0                  ## 插話偵測:持續高音量的累積秒數
+const BARGE_MULT: float = 2.5              ## 插話門檻 = VAD 門檻 × 倍率(防喇叭殘響)
+const BARGE_SUSTAIN: float = 0.25          ## 需持續這麼久才算真的在講話
 ## 反鋸齒(0=關, 1=2x, 2=4x, 3=8x;對應 Viewport.MSAA_*)
 var _msaa: int = 2
 ## 隨機自動表情
@@ -542,7 +545,22 @@ func _process(dt: float) -> void:
 
 	## VAD：錄音中監聽音量，沉默自動送出
 	if _voice != null and _voice.call("is_recording") and _vad_enabled:
-		if rms > _vad_threshold:
+		if bool(_voice.call("is_speaking")):
+			## Doro 講話中 → 插話偵測:門檻加倍+需持續,避免喇叭殘響誤觸
+			if rms > _vad_threshold * BARGE_MULT:
+				_barge_t += dt
+				if _barge_t >= BARGE_SUSTAIN:
+					DoroLogger.log("barge_in", {})
+					_voice.call("stop_speaking")   ## 主人插話 → Doro 閉嘴繼續聽
+					_voice.call("flush_recording_buffer")   ## 沖掉 buffer 裡 Doro 的殘響
+					_barge_t = 0.0
+					_vad_has_spoken = true
+					_vad_silence_t = 0.0
+					if _input_idle_timer != null:
+						_input_idle_timer.stop()
+			else:
+				_barge_t = maxf(0.0, _barge_t - dt * 2.0)
+		elif rms > _vad_threshold:
 			if not _vad_has_spoken and _input_idle_timer != null:
 				## user 開講話 → 取消 idle 關閉倒數(連續對話流程)
 				_input_idle_timer.stop()
@@ -1095,6 +1113,14 @@ func _abort_all() -> bool:
 
 func _on_tts_started() -> void:
 	_reveal_pending_bubble(999.0)   ## 開始講了 → 文字亮出來,停到講完
+	## 連續對話:TTS 播放期間就開錄,支援主人插話打斷(barge-in)
+	if _continuous_voice and _last_input_voice and _vad_enabled \
+			and _input_window != null and _input_window.visible:
+		if _voice != null and _voice.call("has_stt") and not _voice.call("is_recording"):
+			_vad_has_spoken = false
+			_vad_silence_t = 0.0
+			_barge_t = 0.0
+			_voice.call("start_recording")
 
 func _reveal_pending_bubble(seconds: float) -> void:
 	if _pending_bubble_text == "":
@@ -1114,6 +1140,12 @@ func _on_tts_finished() -> void:
 		if _voice != null and _voice.call("has_stt") and not _voice.call("is_recording"):
 			_vad_has_spoken = false
 			_vad_silence_t = 0.0
+			_voice.call("start_recording")
+		elif _voice != null and _voice.call("is_recording") and not _vad_has_spoken:
+			## 播放期間就開著的錄音累積了 Doro 自己的殘響 → 重開清空 buffer
+			_voice.call("abort_recording")
+			_vad_silence_t = 0.0
+			_barge_t = 0.0
 			_voice.call("start_recording")
 		## 起一個較長的 timeout(user 不講話超過 _continuous_timeout_sec 才真關)
 		_start_continuous_timeout()

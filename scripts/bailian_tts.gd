@@ -44,10 +44,9 @@ func start(text: String) -> void:
 	if endpoint.strip_edges() == "" or api_key.strip_edges() == "" or voice.strip_edges() == "":
 		failed_first.emit("百炼未設定（endpoint / API key / voice）")
 		return
-	## 雲端夠快(首音約 2 秒),整句一次送語調才連貫;
-	## 超長文字(>120 字)才退回切句,避免撞輸入上限
+	## 短回覆整句送(語調連貫);長回覆切句管線化,首句先出聲、後句邊播邊生成
 	var clean: String = VoiceboxTTS.to_simplified(VoiceboxTTS.sanitize(text))
-	if clean.length() <= 120:
+	if clean.length() <= 60:
 		_chunks = PackedStringArray([clean]) if clean.strip_edges() != "" else PackedStringArray()
 	else:
 		_chunks = VoiceboxTTS._prepare_chunks(text)

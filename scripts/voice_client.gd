@@ -259,6 +259,11 @@ func get_stt_hotwords() -> String:
 
 func is_recording() -> bool: return _recording
 
+## 清掉錄音 buffer 但不停止錄音(插話打斷時沖掉 Doro 自己的殘響)
+func flush_recording_buffer() -> void:
+	if _eff != null:
+		_eff.clear_buffer()
+
 ## ---------- 系統聲音輸入(loopback) ----------
 var _capture_system_audio: bool = false
 var _mic_device_backup: String = ""   ## 開啟前的麥克風,關閉時還原

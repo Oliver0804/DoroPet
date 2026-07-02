@@ -43,9 +43,9 @@ func start(text: String) -> void:
 	if app_id.strip_edges() == "" or access_token.strip_edges() == "" or speaker.strip_edges() == "":
 		failed_first.emit("BytePlus 未設定(APP ID / Access Token / Speaker ID)")
 		return
-	## 雲端快,整句一次送;超長才切句(同 bailian 策略)
+	## 短回覆整句送(語調連貫);長回覆切句管線化,首句先出聲、後句邊播邊生成
 	var clean: String = VoiceboxTTS.to_simplified(VoiceboxTTS.sanitize(text))
-	if clean.length() <= 120:
+	if clean.length() <= 60:
 		_chunks = PackedStringArray([clean]) if clean.strip_edges() != "" else PackedStringArray()
 	else:
 		_chunks = VoiceboxTTS._prepare_chunks(text)
