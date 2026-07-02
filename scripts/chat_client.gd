@@ -93,7 +93,8 @@ const SYSTEM_RULES: String = """
 若仍看不懂,可用 emotion=4(疑問)反問澄清。
 
 【工具呼叫】
-你有 get_time、get_weather、take_screenshot 三個工具。
+你有 get_time、get_weather、take_screenshot、recall_memory 四個工具。
+主人問起更早以前的事、或你記憶裡沒有的舊話題,用 recall_memory 翻舊帳再回答。
 當使用者問時間、天氣、或要你看螢幕內容,**主動呼叫對應工具**取得最新資料再回答,
 不要瞎掰或猜測。
 **嚴禁**只回「我看看」「稍等我這就看」這種話而不呼叫工具——
@@ -125,6 +126,20 @@ const TOOLS_SCHEMA: Array = [
 					"city": {"type": "string", "description": "城市英文名,例:Taipei、Tokyo、New York。"}
 				},
 				"required": ["city"],
+			},
+		},
+	},
+	{
+		"type": "function",
+		"function": {
+			"name": "recall_memory",
+			"description": "搜尋 Doro 的長期記憶歸檔與更早的對話記錄。當主人問起以前說過的話、更早發生的事、或你目前記憶裡沒有但主人堅稱提過的事,就用關鍵字呼叫。",
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"keyword": {"type": "string", "description": "要搜尋的關鍵字(人名、事物、話題),用最有代表性的短詞"}
+				},
+				"required": ["keyword"],
 			},
 		},
 	},
@@ -408,6 +423,8 @@ func _execute_tool(name: String, args: Dictionary) -> String:
 			return await _tool_get_weather(city)
 		"take_screenshot":
 			return _tool_take_screenshot()
+		"recall_memory":
+			return String(_mem.call("recall", String(args.get("keyword", ""))))
 	return "(未知工具: %s)" % name
 
 func _tool_take_screenshot() -> String:
