@@ -71,8 +71,9 @@ var _tts_bl_rows: Array[Control] = []
 
 ## BytePlus 雲端 TTS
 var _bp_endpoint: LineEdit
-var _bp_api_key: LineEdit
-var _bp_resource_id: LineEdit
+var _bp_app_id: LineEdit
+var _bp_access_token: LineEdit
+var _bp_cluster: LineEdit
 var _bp_speaker: LineEdit
 var _tts_bp_rows: Array[Control] = []
 
@@ -164,8 +165,9 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 	_bl_model.text = String(initial.get("bl_model", ""))
 	_bl_voice.text = String(initial.get("bl_voice", ""))
 	_bp_endpoint.text = String(initial.get("bp_endpoint", ""))
-	_bp_api_key.text = String(initial.get("bp_api_key", ""))
-	_bp_resource_id.text = String(initial.get("bp_resource_id", ""))
+	_bp_app_id.text = String(initial.get("bp_app_id", ""))
+	_bp_access_token.text = String(initial.get("bp_access_token", ""))
+	_bp_cluster.text = String(initial.get("bp_cluster", ""))
 	_bp_speaker.text = String(initial.get("bp_speaker", ""))
 	_vb_endpoint.text = String(initial.get("vb_endpoint", ""))
 	_vb_saved_profile = String(initial.get("vb_profile", ""))
@@ -771,8 +773,9 @@ func _build_ui() -> void:
 	## --- BytePlus 配置（選 BytePlus 時才顯示）---
 	var bp_defs: Array = [
 		["Endpoint", "https://voice.ap-southeast-1.bytepluses.com", false],
-		["API Key", "BytePlus 語音控制台的 API Key", true],
-		["Resource ID", "volc.megatts.default（聲音復刻 2.0 合成）", false],
+		["APP ID", "語音控制台 Service Interface 的 APP ID", false],
+		["Access Token", "語音控制台 Service Interface 的 Access Token", true],
+		["Cluster", "volcano_icl（即時克隆音色）", false],
 		["Speaker ID", "S_...（克隆音色 ID）", false],
 	]
 	var bp_edits: Array[LineEdit] = []
@@ -792,9 +795,10 @@ func _build_ui() -> void:
 		_tts_bp_rows.append(row)
 		bp_edits.append(edit)
 	_bp_endpoint = bp_edits[0]
-	_bp_api_key = bp_edits[1]
-	_bp_resource_id = bp_edits[2]
-	_bp_speaker = bp_edits[3]
+	_bp_app_id = bp_edits[1]
+	_bp_access_token = bp_edits[2]
+	_bp_cluster = bp_edits[3]
+	_bp_speaker = bp_edits[4]
 
 	_vb_http = HTTPRequest.new()
 	_vb_http.timeout = 5.0
@@ -937,8 +941,9 @@ func _collect() -> Dictionary:
 		"bl_model": _bl_model.text,
 		"bl_voice": _bl_voice.text,
 		"bp_endpoint": _bp_endpoint.text,
-		"bp_api_key": _bp_api_key.text,
-		"bp_resource_id": _bp_resource_id.text,
+		"bp_app_id": _bp_app_id.text,
+		"bp_access_token": _bp_access_token.text,
+		"bp_cluster": _bp_cluster.text,
 		"bp_speaker": _bp_speaker.text,
 		"hotkey_keycode": _hotkey_keycode,
 		"hotkey_mods": _hotkey_mods,

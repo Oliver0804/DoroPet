@@ -823,8 +823,9 @@ func _build_chat_ui() -> void:
 	_voice.call("set_bl_model", _config_get("voice", "bl_model", ""))
 	_voice.call("set_bl_voice", _config_get("voice", "bl_voice", ""))
 	_voice.call("set_bp_endpoint", _config_get("voice", "bp_endpoint", ""))
-	_voice.call("set_bp_api_key", _config_get("voice", "bp_api_key", ""))
-	_voice.call("set_bp_resource_id", _config_get("voice", "bp_resource_id", ""))
+	_voice.call("set_bp_app_id", _config_get("voice", "bp_app_id", ""))
+	_voice.call("set_bp_access_token", _config_get("voice", "bp_access_token", ""))
+	_voice.call("set_bp_cluster", _config_get("voice", "bp_cluster", ""))
 	_voice.call("set_bp_speaker", _config_get("voice", "bp_speaker", ""))
 
 	## 錄音指示由 bubble 顯示（不再需要獨立 Label）
@@ -1265,8 +1266,9 @@ func _open_settings() -> void:
 		"bl_model": _voice.call("get_bl_model") if _voice else "",
 		"bl_voice": _voice.call("get_bl_voice") if _voice else "",
 		"bp_endpoint": _voice.call("get_bp_endpoint") if _voice else "",
-		"bp_api_key": _voice.call("get_bp_api_key") if _voice else "",
-		"bp_resource_id": _voice.call("get_bp_resource_id") if _voice else "",
+		"bp_app_id": _voice.call("get_bp_app_id") if _voice else "",
+		"bp_access_token": _voice.call("get_bp_access_token") if _voice else "",
+		"bp_cluster": _voice.call("get_bp_cluster") if _voice else "",
 		"bp_speaker": _voice.call("get_bp_speaker") if _voice else "",
 		"hotkey_keycode": _hotkey_keycode,
 		"hotkey_mods": _hotkey_mods,
@@ -1361,8 +1363,9 @@ func _on_settings_changed(data: Dictionary) -> void:
 		_voice.call("set_bl_model", data.get("bl_model", ""))
 		_voice.call("set_bl_voice", data.get("bl_voice", ""))
 		_voice.call("set_bp_endpoint", data.get("bp_endpoint", ""))
-		_voice.call("set_bp_api_key", data.get("bp_api_key", ""))
-		_voice.call("set_bp_resource_id", data.get("bp_resource_id", ""))
+		_voice.call("set_bp_app_id", data.get("bp_app_id", ""))
+		_voice.call("set_bp_access_token", data.get("bp_access_token", ""))
+		_voice.call("set_bp_cluster", data.get("bp_cluster", ""))
 		_voice.call("set_bp_speaker", data.get("bp_speaker", ""))
 	_save_config()
 
@@ -1452,7 +1455,8 @@ func _save_config() -> void:
 		cfg.set_value("voice", "bl_model", _voice.call("get_bl_model"))
 		cfg.set_value("voice", "bl_voice", _voice.call("get_bl_voice"))
 		cfg.set_value("voice", "bp_endpoint", _voice.call("get_bp_endpoint"))
-		cfg.set_value("voice", "bp_api_key", _voice.call("get_bp_api_key"))
-		cfg.set_value("voice", "bp_resource_id", _voice.call("get_bp_resource_id"))
+		cfg.set_value("voice", "bp_app_id", _voice.call("get_bp_app_id"))
+		cfg.set_value("voice", "bp_access_token", _voice.call("get_bp_access_token"))
+		cfg.set_value("voice", "bp_cluster", _voice.call("get_bp_cluster"))
 		cfg.set_value("voice", "bp_speaker", _voice.call("get_bp_speaker"))
 	cfg.save(CONFIG_PATH)

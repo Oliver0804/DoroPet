@@ -212,11 +212,13 @@ func get_bl_voice() -> String: return _bl.voice
 func set_bp_endpoint(e: String) -> void:
 	_bp.endpoint = e.strip_edges().rstrip("/") if e.strip_edges() != "" else "https://voice.ap-southeast-1.bytepluses.com"
 func get_bp_endpoint() -> String: return _bp.endpoint
-func set_bp_api_key(k: String) -> void: _bp.api_key = k.strip_edges()
-func get_bp_api_key() -> String: return _bp.api_key
-func set_bp_resource_id(r: String) -> void:
-	_bp.resource_id = r.strip_edges() if r.strip_edges() != "" else "volc.megatts.default"
-func get_bp_resource_id() -> String: return _bp.resource_id
+func set_bp_app_id(a: String) -> void: _bp.app_id = a.strip_edges()
+func get_bp_app_id() -> String: return _bp.app_id
+func set_bp_access_token(t: String) -> void: _bp.access_token = t.strip_edges()
+func get_bp_access_token() -> String: return _bp.access_token
+func set_bp_cluster(c: String) -> void:
+	_bp.cluster = c.strip_edges() if c.strip_edges() != "" else "volcano_icl"
+func get_bp_cluster() -> String: return _bp.cluster
 func set_bp_speaker(s: String) -> void: _bp.speaker = s.strip_edges()
 func get_bp_speaker() -> String: return _bp.speaker
 

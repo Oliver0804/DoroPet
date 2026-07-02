@@ -1,8 +1,7 @@
 extends Node
 ## BytePlus(火山國際版)聲音復刻 TTS 客戶端
-## POST /api/v3/tts/unidirectional,回應是 NDJSON 行流,
-## 每行 {code,data(base64 音訊塊),message},code 20000000 = 結束。
-## 要 pcm 塊自己包 WAV 頭,交給 voice_client 共用播放佇列。
+## 走 v1 經典 API:POST /api/v1/tts,APP ID + Access Token 認證,
+## cluster=volcano_icl(即時克隆音色),回應 JSON {code:3000, data:base64 WAV}。
 
 signal chunk_ready(path: String, idx: int)
 signal finished_generating(ok_count: int)
@@ -10,12 +9,12 @@ signal failed_first(reason: String)
 
 const DoroLogger := preload("res://scripts/logger.gd")
 const VoiceboxTTS := preload("res://scripts/voicebox_tts.gd")   ## 借用切句/繁簡/去符號
-const SAMPLE_RATE: int = 24000
 
 var endpoint: String = "https://voice.ap-southeast-1.bytepluses.com"
-var api_key: String = ""
-var resource_id: String = "volc.megatts.default"   ## 聲音復刻 2.0 合成
-var speaker: String = ""                            ## S_ 開頭音色 ID
+var app_id: String = ""
+var access_token: String = ""
+var cluster: String = "volcano_icl"   ## 即時克隆;訂閱制大模型克隆用 volcano_mega
+var speaker: String = ""              ## S_ 開頭音色 ID
 
 var _http: HTTPRequest
 var _session: int = 0
@@ -41,8 +40,8 @@ func cancel() -> void:
 
 func start(text: String) -> void:
 	cancel()
-	if api_key.strip_edges() == "" or speaker.strip_edges() == "":
-		failed_first.emit("BytePlus 未設定(API key / Speaker ID)")
+	if app_id.strip_edges() == "" or access_token.strip_edges() == "" or speaker.strip_edges() == "":
+		failed_first.emit("BytePlus 未設定(APP ID / Access Token / Speaker ID)")
 		return
 	## 雲端快,整句一次送;超長才切句(同 bailian 策略)
 	var clean: String = VoiceboxTTS.to_simplified(VoiceboxTTS.sanitize(text))
@@ -77,21 +76,17 @@ static func _uuid() -> String:
 func _submit_current() -> void:
 	var s: int = _session
 	var body: String = JSON.stringify({
-		"req_params": {
-			"text": _chunks[_idx],
-			"speaker": speaker,
-			"audio_params": {"format": "pcm", "sample_rate": SAMPLE_RATE},
-			"additions": JSON.stringify({"disable_markdown_filter": true}),
-		},
+		"app": {"appid": app_id, "token": access_token, "cluster": cluster},
+		"user": {"uid": "doropet"},
+		"audio": {"voice_type": speaker, "encoding": "wav"},
+		"request": {"reqid": _uuid(), "text": _chunks[_idx], "operation": "query"},
 	})
 	var headers: PackedStringArray = [
 		"Content-Type: application/json",
-		"X-Api-Key: " + api_key,
-		"X-Api-Resource-Id: " + resource_id,
-		"X-Api-Request-Id: " + _uuid(),
+		"Authorization: Bearer;" + access_token,
 	]
 	var err: int = _http.request(
-		endpoint.rstrip("/") + "/api/v3/tts/unidirectional",
+		endpoint.rstrip("/") + "/api/v1/tts",
 		headers, HTTPClient.METHOD_POST, body)
 	if err != OK and s == _session:
 		_fail("送出生成請求失敗(err=%d)" % err)
@@ -106,42 +101,29 @@ func _on_http_completed(result: int, code: int, _h: PackedStringArray, body: Pac
 	if code < 200 or code >= 300:
 		_fail("BytePlus HTTP %d: %s" % [code, text.substr(0, 200)])
 		return
-	## NDJSON 行流 → 串接 base64 音訊塊
-	var pcm: PackedByteArray = PackedByteArray()
-	for line in text.split("\n"):
-		if line.strip_edges() == "":
-			continue
-		var parsed: Variant = JSON.parse_string(line)
-		if typeof(parsed) != TYPE_DICTIONARY:
-			continue
-		var d: Dictionary = parsed
-		## 有些錯誤包在 header 物件裡
-		if d.has("header"):
-			var hd: Dictionary = d["header"]
-			if int(hd.get("code", 0)) != 0 and int(hd.get("code", 0)) != 20000000:
-				_fail("BytePlus code %d: %s" % [int(hd.get("code", 0)), String(hd.get("message", ""))])
-				return
-			continue
-		var lc: int = int(d.get("code", 0))
-		if lc != 0 and lc != 20000000:
-			_fail("BytePlus code %d: %s" % [lc, String(d.get("message", ""))])
-			return
-		var b64: String = String(d.get("data", ""))
-		if b64 != "":
-			pcm.append_array(Marshalls.base64_to_raw(b64))
-	if pcm.is_empty():
+	var parsed: Variant = JSON.parse_string(text)
+	if typeof(parsed) != TYPE_DICTIONARY:
+		_fail("BytePlus 回覆格式異常")
+		return
+	var d: Dictionary = parsed
+	if int(d.get("code", 0)) != 3000:
+		_fail("BytePlus code %d: %s" % [int(d.get("code", 0)), String(d.get("message", ""))])
+		return
+	var b64: String = String(d.get("data", ""))
+	if b64 == "":
 		_fail("BytePlus 沒回音訊資料")
 		return
+	var wav: PackedByteArray = Marshalls.base64_to_raw(b64)   ## encoding=wav → 直接是 WAV 檔
 	var path: String = "user://doro_bp_%d_%d.wav" % [_session, _idx]
 	var f: FileAccess = FileAccess.open(path, FileAccess.WRITE)
 	if f == null:
 		_fail("無法寫入音檔")
 		return
-	f.store_buffer(_wrap_wav(pcm))
+	f.store_buffer(wav)
 	f.close()
 	_ok_count += 1
 	DoroLogger.log("tts_bp_chunk", {
-		"chunk": _idx, "total": _chunks.size(), "bytes": pcm.size(),
+		"chunk": _idx, "total": _chunks.size(), "bytes": wav.size(),
 		"elapsed_ms": Time.get_ticks_msec() - _started_ms,
 	})
 	chunk_ready.emit(path, _idx)
@@ -151,24 +133,3 @@ func _on_http_completed(result: int, code: int, _h: PackedStringArray, body: Pac
 		finished_generating.emit(_ok_count)
 	else:
 		_submit_current()
-
-## raw 16-bit mono pcm → WAV
-static func _wrap_wav(pcm: PackedByteArray) -> PackedByteArray:
-	var n: int = pcm.size()
-	var buf: PackedByteArray = PackedByteArray()
-	buf.resize(44)
-	buf.encode_u32(0, 0x46464952)            ## "RIFF"
-	buf.encode_u32(4, 36 + n)
-	buf.encode_u32(8, 0x45564157)            ## "WAVE"
-	buf.encode_u32(12, 0x20746d66)           ## "fmt "
-	buf.encode_u32(16, 16)
-	buf.encode_u16(20, 1)                    ## PCM
-	buf.encode_u16(22, 1)                    ## mono
-	buf.encode_u32(24, SAMPLE_RATE)
-	buf.encode_u32(28, SAMPLE_RATE * 2)
-	buf.encode_u16(32, 2)
-	buf.encode_u16(34, 16)
-	buf.encode_u32(36, 0x61746164)           ## "data"
-	buf.encode_u32(40, n)
-	buf.append_array(pcm)
-	return buf
