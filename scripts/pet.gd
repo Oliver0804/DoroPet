@@ -785,6 +785,7 @@ func _build_chat_ui() -> void:
 	var cfg_persona: String = _config_get("chat", "persona", "")
 	if cfg_persona != "":
 		_chat.call("set_persona", cfg_persona)
+	_chat.call("set_distill_model", _config_get("chat", "distill_model", ""))
 
 	## voice client
 	_voice = VoiceClient.new()
@@ -1240,6 +1241,7 @@ func _open_settings() -> void:
 		"api_key": _chat.call("get_api_key"),
 		"model": _chat.call("get_model"),
 		"persona": _chat.call("get_persona"),
+		"distill_model": _chat.call("get_distill_model"),
 		"voice_engine": _voice.call("get_engine") if _voice else "local",
 		"voice_api_key": _voice.call("get_api_key") if _voice else "",
 		"voice_endpoint": _voice.call("get_endpoint") if _voice else "",
@@ -1329,6 +1331,7 @@ func _on_settings_changed(data: Dictionary) -> void:
 		_chat.call("set_api_key", data.get("api_key", ""))
 		_chat.call("set_model", data.get("model", ""))
 		_chat.call("set_persona", data.get("persona", ""))
+		_chat.call("set_distill_model", data.get("distill_model", ""))
 	if _voice:
 		_voice.call("set_engine", data.get("voice_engine", "local"))
 		_voice.call("set_api_key", data.get("voice_api_key", ""))
@@ -1414,6 +1417,7 @@ func _save_config() -> void:
 		cfg.set_value("chat", "api_key", _chat.call("get_api_key"))
 		cfg.set_value("chat", "model", _chat.call("get_model"))
 		cfg.set_value("chat", "persona", _chat.call("get_persona"))
+		cfg.set_value("chat", "distill_model", _chat.call("get_distill_model"))
 	if _voice:
 		cfg.set_value("voice", "engine", _voice.call("get_engine"))
 		cfg.set_value("voice", "api_key", _voice.call("get_api_key"))

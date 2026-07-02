@@ -19,6 +19,7 @@ var _ontop_check: CheckBox
 var _gaze_check: CheckBox
 var _api_key: LineEdit
 var _model_edit: LineEdit
+var _distill_model_edit: LineEdit
 var _model_preset: OptionButton
 var _persona_edit: TextEdit
 var _model_status: Label
@@ -126,6 +127,7 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 	_api_key.text = initial.get("api_key", "")
 	_model_edit.text = initial.get("model", "bytedance-seed/seed-2.0-mini")
 	_sync_model_preset()
+	_distill_model_edit.text = String(initial.get("distill_model", ""))
 	_persona_edit.text = initial.get("persona", "")
 	_model_status.text = "OpenRouter: " + chat_status
 	_voice_api_key.text = initial.get("voice_api_key", "")
@@ -414,6 +416,20 @@ func _build_ui() -> void:
 	model_row.add_child(model_cap)
 	model_row.add_child(_model_edit)
 	vb.add_child(model_row)
+
+	## 記憶蒸餾 model(背景整理主人筆記用,可用強一點的)
+	var dm_row: HBoxContainer = HBoxContainer.new()
+	var dm_cap: Label = Label.new()
+	dm_cap.text = "記憶 Model"
+	dm_cap.custom_minimum_size = Vector2(80, 0)
+	dm_cap.tooltip_text = "背景蒸餾主人筆記用;空 = 跟對話同一個"
+	_distill_model_edit = LineEdit.new()
+	_distill_model_edit.placeholder_text = "空 = 同上;建議 deepseek/deepseek-chat-v3.1"
+	_distill_model_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_distill_model_edit.text_changed.connect(_on_text_changed)
+	dm_row.add_child(dm_cap)
+	dm_row.add_child(_distill_model_edit)
+	vb.add_child(dm_row)
 
 	var persona_label: Label = Label.new()
 	persona_label.text = "人設 prompt"
@@ -833,6 +849,7 @@ func _collect() -> Dictionary:
 		"msaa": _msaa_select.selected,
 		"api_key": _api_key.text,
 		"model": _model_edit.text,
+		"distill_model": _distill_model_edit.text,
 		"persona": _persona_edit.text,
 		"voice_engine": "local" if _voice_engine.selected == 0 else "api",
 		"voice_api_key": _voice_api_key.text,

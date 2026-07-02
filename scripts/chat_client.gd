@@ -143,6 +143,7 @@ var _history: Array = []                   ## [{role,content}, ...]
 var _running_messages: Array = []          ## 當前 in-flight 的 messages(可含 tool_calls)
 var _api_key: String = ""
 var _model: String = DEFAULT_MODEL
+var _distill_model: String = ""            ## 記憶蒸餾用 model;空 = 跟 _model 同
 var _persona: String = DEFAULT_PERSONA
 var _in_flight: bool = false
 var _request_started_ms: int = 0
@@ -171,6 +172,12 @@ func get_api_key() -> String:
 
 func get_model() -> String:
 	return _model
+
+func set_distill_model(m: String) -> void:
+	_distill_model = m.strip_edges()
+
+func get_distill_model() -> String:
+	return _distill_model
 
 func get_persona() -> String:
 	return _persona
@@ -344,7 +351,9 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 	_in_flight = false
 	var reply: String = String(message.get("content", ""))
 	_history.append({"role": "assistant", "content": reply})
-	_mem.call("on_exchange", _history, _api_key, _model)   ## 落盤 + 累積夠就背景蒸餾
+	## 落盤 + 累積夠就背景蒸餾(蒸餾可指定較強 model,不影響對話延遲)
+	_mem.call("on_exchange", _history, _api_key,
+		_distill_model if _distill_model != "" else _model)
 	var clean: String = reply.strip_edges()
 	## 去掉可能的 ``` 或 ```json fence
 	if clean.begins_with("```"):
