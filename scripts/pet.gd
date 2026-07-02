@@ -726,12 +726,16 @@ func _input(event: InputEvent) -> void:
 				_open_input()
 			get_viewport().set_input_as_handled()
 			return
-		## ESC：取消
-		if event.keycode == KEY_ESCAPE and input_open:
-			if _voice != null and _voice.call("is_recording"):
-				_voice.call("abort_recording")
-			_close_input()
-			get_viewport().set_input_as_handled()
+		## ESC：全域中止 — 不管在哪個階段(LLM 請求中、TTS 生成中、播放中、錄音中)全部停下
+		if event.keycode == KEY_ESCAPE:
+			var did: bool = _abort_all()
+			if input_open:
+				if _voice != null and _voice.call("is_recording"):
+					_voice.call("abort_recording")
+				_close_input()
+				did = true
+			if did:
+				get_viewport().set_input_as_handled()
 			return
 	if event is InputEventMouseButton:
 		if event.button_index == MOUSE_BUTTON_LEFT:
@@ -1034,6 +1038,27 @@ func _on_chat_reply(text: String, emotion: int) -> void:
 		_show_bubble(text, _bubble_seconds)
 		## TTS 關閉:沒 speaking_finished signal → 手動觸發連續流程
 		_on_tts_finished()
+
+## 中止一切進行中的 LLM / TTS 工作。回傳是否真的有東西被停掉。
+func _abort_all() -> bool:
+	var did: bool = false
+	if _chat != null and bool(_chat.call("is_busy")):
+		_chat.call("abort")
+		did = true
+	if _voice != null and bool(_voice.call("is_speaking")):
+		did = true
+	if _voice != null:
+		_voice.call("stop_speaking")   ## 停播放 + 取消 voicebox/百炼/BytePlus 生成
+	if _pending_bubble_text != "":
+		_pending_bubble_text = ""      ## 壓著等語音的文字直接丟棄
+		did = true
+	if _thinking:
+		_end_thinking()
+		did = true
+	if did:
+		DoroLogger.log("user_abort", {})
+		_show_bubble("(已取消)", 1.5)
+	return did
 
 func _on_tts_started() -> void:
 	_reveal_pending_bubble(999.0)   ## 開始講了 → 文字亮出來,停到講完

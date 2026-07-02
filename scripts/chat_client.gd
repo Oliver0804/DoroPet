@@ -209,6 +209,19 @@ func get_status() -> String:
 		return "未設定 OPENROUTER_API_KEY"
 	return "ready (model=%s)" % _model
 
+func is_busy() -> bool:
+	return _in_flight
+
+## 中止當前 in-flight 請求(含 tool 回合)。撤掉還沒得到回覆的 user 訊息。
+func abort() -> void:
+	if not _in_flight:
+		return
+	_in_flight = false
+	_http.cancel_request()
+	if not _history.is_empty() and String((_history.back() as Dictionary).get("role", "")) == "user":
+		_history.pop_back()
+	DoroLogger.log("chat_abort", {})
+
 func reset_history() -> void:
 	_history.clear()
 	if _mem != null:
@@ -262,6 +275,8 @@ func send(user_text: String, image_b64: String = "") -> void:
 
 ## 真正送 round (可含 tool result),共用 in-flight state
 func _send_round() -> void:
+	if not _in_flight:
+		return   ## 被 abort() 中止
 	## 若有 pending 截圖,在送出前 append 一條 user multimodal message
 	if _pending_image_b64 != "":
 		_running_messages.append({
@@ -338,6 +353,8 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 				args = args_parser.data
 			tool_started.emit(fn_name)
 			var tool_result: String = await _execute_tool(fn_name, args)
+			if not _in_flight:
+				return   ## tool 跑到一半被 abort()
 			DoroLogger.log("tool_call", {"name": fn_name, "args": args, "result": tool_result.substr(0, 200)})
 			_running_messages.append({
 				"role": "tool",
