@@ -98,7 +98,7 @@ const SYSTEM_RULES: String = """
 不要瞎掰或猜測。
 
 【絕對禁止】純文字、解釋、code fence、多個 JSON、emoji 圖示。"""
-const MAX_HISTORY: int = 8                 ## 對話 context 上限（user+assistant 訊息對）
+const MAX_HISTORY: int = 24                ## 對話 context 上限（user+assistant 訊息對）
 const TIMEOUT_SEC: float = 30.0
 
 const DoroLogger := preload("res://scripts/logger.gd")

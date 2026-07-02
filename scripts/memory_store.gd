@@ -10,8 +10,8 @@ signal distilled(note: String)
 const HISTORY_PATH: String = "user://doro_history.json"
 const MEMORY_PATH: String = "user://doro_memory.txt"
 const DISTILL_EVERY: int = 6        ## 每 6 條訊息(3 輪)蒸餾一次
-const DISTILL_TAIL: int = 12        ## 蒸餾時最多帶最近 12 條對話
-const NOTE_MAX_CHARS: int = 600     ## 筆記硬上限(LLM 目標 500,超了截斷保險)
+const DISTILL_TAIL: int = 24        ## 蒸餾時最多帶最近 24 條對話
+const NOTE_MAX_CHARS: int = 2000    ## 筆記硬上限(LLM 目標 1500,超了截斷保險)
 const ENDPOINT: String = "https://openrouter.ai/api/v1/chat/completions"
 const DoroLogger := preload("res://scripts/logger.gd")
 
@@ -24,7 +24,8 @@ const DISTILL_PROMPT: String = """你是 Doro(桌面寵物)的記憶整理器。
 規則:
 - 繁體中文、條列式(- 開頭)
 - 合併同類、去重;過時的事實用新的覆蓋
-- 總長不超過 500 字,超過就淘汰最不重要的
+- 總長不超過 1500 字,超過就淘汰最不重要的
+- 空間夠就保留細節(日期、具體專案名、原話中的關鍵詞),別過度濃縮
 - 沒有新事實就原樣輸出既有筆記
 - 只輸出筆記內容本身,不要任何解釋、標題、code fence"""
 
@@ -89,7 +90,7 @@ func distill_now(history: Array, api_key: String, model: String) -> void:
 			{"role": "system", "content": DISTILL_PROMPT},
 			{"role": "user", "content": user_msg},
 		],
-		"max_tokens": 700,
+		"max_tokens": 2200,
 		"temperature": 0.2,
 	}
 	var headers: PackedStringArray = [
