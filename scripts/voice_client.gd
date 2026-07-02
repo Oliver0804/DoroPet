@@ -36,6 +36,10 @@ const TMP_TTS_PATH: String = "user://doro_tts.wav"
 var _recording: bool = false
 var _sample_rate: int = 0
 
+## --- 百炼 qwen3-asr-flash（STT 第三引擎,同步 HTTP,憑證共用百炼 TTS）---
+var _asr_http: HTTPRequest
+var _asr_busy: bool = false
+
 ## --- 雲端/本機生成式 TTS 後端（voicebox 本機 / bailian 雲端）---
 const VoiceboxTTS := preload("res://scripts/voicebox_tts.gd")
 const BailianTTS := preload("res://scripts/bailian_tts.gd")
@@ -49,7 +53,7 @@ var _vb_generating: bool = false
 var _vb_started_emitted: bool = false
 var _vb_pending_text: String = ""        ## 生成掛掉時 fallback 系統 TTS 用
 
-var _engine: String = "local"        ## "local" | "api"
+var _engine: String = "local"        ## "local" | "api" | "bailian"
 var _api_key: String = ""
 var _endpoint: String = DEFAULT_STT_ENDPOINT
 var _model: String = DEFAULT_STT_MODEL
@@ -148,6 +152,11 @@ func _ready() -> void:
 	_bl.failed_first.connect(_on_vb_failed_first)
 	add_child(_bl)
 
+	_asr_http = HTTPRequest.new()
+	_asr_http.timeout = 20.0
+	_asr_http.request_completed.connect(_on_asr_response)
+	add_child(_asr_http)
+
 	_bp = ByteplusTTS.new()
 	_bp.name = "ByteplusTTS"
 	_bp.chunk_ready.connect(_on_vb_chunk_ready)
@@ -157,7 +166,7 @@ func _ready() -> void:
 
 ## ---------- runtime 設定 ----------
 func set_engine(e: String) -> void:
-	if e == "api" or e == "local":
+	if e in ["api", "local", "bailian"]:
 		_engine = e
 func get_engine() -> String: return _engine
 
@@ -275,6 +284,10 @@ func stt_status() -> String:
 		if not FileAccess.file_exists(_local_model):
 			return "本地：找不到模型 %s" % _local_model
 		return "本地 whisper.cpp (%s)" % _local_model.get_file()
+	if _engine == "bailian":
+		if _bl == null or _bl.api_key == "" or _bl.endpoint == "":
+			return "百炼：未設定（沿用 TTS 的百炼 Endpoint/Key）"
+		return "百炼 qwen3-asr-flash"
 	if _api_key == "":
 		return "雲端：未設定 OPENAI_API_KEY"
 	return "雲端 %s" % _model
@@ -282,6 +295,8 @@ func stt_status() -> String:
 func has_stt() -> bool:
 	if _engine == "local":
 		return FileAccess.file_exists(_local_model) and FileAccess.file_exists(_local_bin)
+	if _engine == "bailian":
+		return _bl != null and _bl.api_key != "" and _bl.endpoint != ""
 	return _api_key != ""
 
 ## ---------- 錄音 ----------
@@ -332,6 +347,8 @@ func stop_and_send() -> void:
 	DoroLogger.log("stt_request", {"engine": _engine, "audio_sec": audio_sec})
 	if _engine == "local":
 		_run_local_whisper(ProjectSettings.globalize_path(TMP_WAV))
+	elif _engine == "bailian":
+		_submit_bailian_asr(wav)
 	else:
 		_upload_wav(wav)
 
@@ -425,6 +442,59 @@ func _frames_to_wav(frames: PackedVector2Array, sr: int) -> PackedByteArray:
 		var v: int = int(round(s * 32767.0))
 		buf.encode_s16(44 + i * 2, v)
 	return buf
+
+## ---------- 百炼 qwen3-asr-flash（同步 HTTP,一來一回,實測 ~1.3s）----------
+func _submit_bailian_asr(wav: PackedByteArray) -> void:
+	_asr_busy = true
+	var body: String = JSON.stringify({
+		"model": "qwen3-asr-flash",
+		"input": {"messages": [{"role": "user", "content": [
+			{"audio": "data:audio/wav;base64," + Marshalls.raw_to_base64(wav)},
+		]}]},
+		"parameters": {"asr_options": {"enable_itn": true}},
+	})
+	var headers: PackedStringArray = [
+		"Authorization: Bearer " + String(_bl.api_key),
+		"Content-Type: application/json",
+	]
+	var err: int = _asr_http.request(
+		String(_bl.endpoint).rstrip("/") + "/api/v1/services/aigc/multimodal-generation/generation",
+		headers, HTTPClient.METHOD_POST, body)
+	if err != OK:
+		_asr_busy = false
+		stt_error.emit("百炼 ASR 送出失敗 (err=%d)" % err)
+
+func _on_asr_response(result: int, code: int, _h: PackedStringArray, body: PackedByteArray) -> void:
+	if not _asr_busy:
+		return
+	_asr_busy = false
+	var lat: int = Time.get_ticks_msec() - _stt_started_ms
+	if result != HTTPRequest.RESULT_SUCCESS:
+		DoroLogger.log("stt_error", {"engine": "bailian", "reason": "network %d" % result, "latency_ms": lat})
+		stt_error.emit("百炼 ASR 網路錯誤 (result=%d)" % result)
+		return
+	var raw: String = body.get_string_from_utf8()
+	if code < 200 or code >= 300:
+		DoroLogger.log("stt_error", {"engine": "bailian", "reason": "HTTP %d" % code, "body": raw.substr(0, 200), "latency_ms": lat})
+		stt_error.emit("百炼 ASR HTTP %d: %s" % [code, raw.substr(0, 150)])
+		return
+	## output.choices[0].message.content[0].text
+	var text: String = ""
+	var parsed: Variant = JSON.parse_string(raw)
+	if typeof(parsed) == TYPE_DICTIONARY:
+		var choices: Array = ((parsed as Dictionary).get("output", {}) as Dictionary).get("choices", [])
+		if not choices.is_empty():
+			var content: Array = (choices[0].get("message", {}) as Dictionary).get("content", [])
+			for c in content:
+				if typeof(c) == TYPE_DICTIONARY and c.has("text"):
+					text += String(c["text"])
+	text = text.strip_edges()
+	if text == "":
+		DoroLogger.log("stt_error", {"engine": "bailian", "reason": "empty", "latency_ms": lat})
+		stt_error.emit("沒辨識到內容")
+		return
+	DoroLogger.log("stt_response", {"engine": "bailian", "text": text, "latency_ms": lat})
+	transcribed.emit(text)
 
 ## ---------- Whisper multipart upload ----------
 func _upload_wav(wav: PackedByteArray) -> void:

@@ -92,6 +92,8 @@ var _capturing_hotkey: bool = false
 ## STT 條件顯示用
 var _stt_local_rows: Array[Control] = []
 var _stt_cloud_rows: Array[Control] = []
+var _stt_bp_rows: Array[Control] = []
+const STT_ENGINES: Array = ["local", "api", "bailian"]
 
 ## 自動更新
 var _auto_update_check: CheckBox
@@ -148,7 +150,7 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 	_voice_local_bin.text = initial.get("voice_local_bin", "")
 	_voice_local_model.text = initial.get("voice_local_model", "")
 	var eng: String = initial.get("voice_engine", "local")
-	_voice_engine.select(0 if eng == "local" else 1)
+	_voice_engine.select(maxi(0, STT_ENGINES.find(eng)))
 	_update_stt_visibility()
 	_tts_enabled.button_pressed = initial.get("tts_enabled", true)
 	_tts_volume_slider.value = float(initial.get("tts_volume", 1.0))
@@ -558,6 +560,7 @@ func _build_ui() -> void:
 	_voice_engine = OptionButton.new()
 	_voice_engine.add_item("本地 (whisper.cpp,免費離線)")
 	_voice_engine.add_item("雲端 API (OpenAI 兼容)")
+	_voice_engine.add_item("百炼雲端 (qwen3-asr-flash,快又準)")
 	_voice_engine.item_selected.connect(_on_voice_engine_changed)
 	eng_row.add_child(eng_cap)
 	eng_row.add_child(_voice_engine)
@@ -630,6 +633,14 @@ func _build_ui() -> void:
 	vmodel_row.add_child(_voice_model)
 	vb.add_child(vmodel_row)
 	_stt_cloud_rows.append(vmodel_row)
+
+	## --- 百炼 ASR 提示(選百炼時才顯示;憑證沿用 TTS 區的百炼設定)---
+	var basr_hint: Label = Label.new()
+	basr_hint.text = "  沿用下方 TTS 區「百炼雲端」的 Endpoint 與 API Key(免費額度 36,000 次)"
+	basr_hint.add_theme_color_override("font_color", Color(0.6, 0.6, 0.6))
+	basr_hint.add_theme_font_size_override("font_size", 12)
+	vb.add_child(basr_hint)
+	_stt_bp_rows.append(basr_hint)
 
 	## ---------- 🔊 TTS — 語音輸出 ----------
 	vb.add_child(_separator())
@@ -923,7 +934,7 @@ func _collect() -> Dictionary:
 		"model": _model_edit.text,
 		"distill_model": _distill_model_edit.text,
 		"persona": _persona_edit.text,
-		"voice_engine": "local" if _voice_engine.selected == 0 else "api",
+		"voice_engine": STT_ENGINES[maxi(0, _voice_engine.selected)],
 		"voice_api_key": _voice_api_key.text,
 		"voice_endpoint": _voice_endpoint.text,
 		"voice_model": _voice_model.text,
@@ -1064,11 +1075,13 @@ func _on_voice_engine_changed(_i: int) -> void:
 	_emit()
 
 func _update_stt_visibility() -> void:
-	var is_local: bool = _voice_engine.selected == 0
+	var sel: int = _voice_engine.selected
 	for r in _stt_local_rows:
-		r.visible = is_local
+		r.visible = sel == 0
 	for r in _stt_cloud_rows:
-		r.visible = not is_local
+		r.visible = sel == 1
+	for r in _stt_bp_rows:
+		r.visible = sel == 2
 
 ## ---------- 對話熱鍵 capture ----------
 func _refresh_hotkey_btn() -> void:
