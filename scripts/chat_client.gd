@@ -96,6 +96,8 @@ const SYSTEM_RULES: String = """
 你有 get_time、get_weather、take_screenshot 三個工具。
 當使用者問時間、天氣、或要你看螢幕內容,**主動呼叫對應工具**取得最新資料再回答,
 不要瞎掰或猜測。
+**嚴禁**只回「我看看」「稍等我這就看」這種話而不呼叫工具——
+說要看螢幕就必須在同一回合呼叫 take_screenshot,說要查就必須馬上查。
 
 【絕對禁止】純文字、解釋、code fence、多個 JSON、emoji 圖示。"""
 const MAX_HISTORY: int = 24                ## 對話 context 上限（user+assistant 訊息對）
@@ -424,8 +426,14 @@ func _capture_screen_b64() -> String:
 		tmp = "/tmp"
 	var path: String = tmp.rstrip("/").rstrip("\\") + ("/" if OS.get_name() != "Windows" else "\\") + "doropet_llm_screen.png"
 	var rc: int = -1
+	var errout: Array = []
 	if OS.get_name() == "macOS":
-		rc = OS.execute("/usr/sbin/screencapture", ["-x", "-t", "png", "-m", path], [], false)
+		rc = OS.execute("/usr/sbin/screencapture", ["-x", "-t", "png", "-m", path], errout, true)
+		if rc != 0 or not FileAccess.file_exists(path):
+			## 暫時性失敗(鎖屏/權限重確認彈窗)重試一次
+			DoroLogger.log("screenshot_retry", {"rc": rc, "err": str(errout).substr(0, 150)})
+			errout.clear()
+			rc = OS.execute("/usr/sbin/screencapture", ["-x", "-t", "png", "-m", path], errout, true)
 	elif OS.get_name() == "Windows":
 		var ps_path: String = path.replace("/", "\\")
 		var script: String = (
@@ -438,6 +446,8 @@ func _capture_screen_b64() -> String:
 			"$g.Dispose();$b.Dispose();") % ps_path
 		rc = OS.execute("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], [], false)
 	if rc != 0 or not FileAccess.file_exists(path):
+		DoroLogger.log("screenshot_error", {"rc": rc, "os": OS.get_name(),
+			"err": str(errout).substr(0, 200), "path_exists": FileAccess.file_exists(path)})
 		return ""
 	var f: FileAccess = FileAccess.open(path, FileAccess.READ)
 	if f == null:
