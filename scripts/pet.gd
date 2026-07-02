@@ -934,8 +934,8 @@ func _reposition_input() -> void:
 
 ## 訊息含這些關鍵字 → 自動截圖附帶
 const SCREEN_KEYWORDS: PackedStringArray = [
-	"螢幕", "畫面", "桌面", "你看", "看看", "看一下", "幫我看", "看這",
-	"這個", "這邊", "我這", "截圖",
+	"螢幕", "熒幕", "荧幕", "屏幕", "畫面", "画面", "桌面", "你看", "看看",
+	"看一下", "幫我看", "看這", "這個", "這邊", "我這", "截圖",
 	"screen", "see this", "look at", "screenshot",
 ]
 
@@ -1212,12 +1212,16 @@ func _on_recording_stopped() -> void:
 	_bubble_timer.stop()
 
 func _on_voice_transcribed(text: String) -> void:
-	## STT 完成 → 直接送
+	## STT 完成 → 檢查截圖關鍵字(跟打字路徑一致)再送
 	_last_input_voice = true
 	_show_bubble("「%s」" % text, 2.0)
 	await get_tree().create_timer(0.3).timeout
+	var img: String = ""
+	if _wants_screenshot(text):
+		_show_bubble("📸 Doro 在看畫面…", 999.0)
+		img = _grab_screenshot_b64()
 	_show_bubble("💭 Doro 正在想…", 999.0)
-	_chat.call("send", text)
+	_chat.call("send", text, img)
 	if _input_box != null and _input_window.visible:
 		_input_box.text = ""
 		## 連續對話模式:不起 idle timer,等 TTS 結束 _on_tts_finished 會自動再開錄音
@@ -1227,6 +1231,15 @@ func _on_voice_transcribed(text: String) -> void:
 
 func _on_voice_error(reason: String) -> void:
 	_end_thinking()
+	## 連續對話模式的空白錄音(環境音誤觸 VAD)不當錯誤:安靜地繼續聽
+	if reason.contains("沒辨識到內容") and _continuous_voice and _last_input_voice \
+			and _input_window != null and _input_window.visible:
+		if _voice != null and _voice.call("has_stt") and not _voice.call("is_recording"):
+			_vad_has_spoken = false
+			_vad_silence_t = 0.0
+			_voice.call("start_recording")
+			_start_continuous_timeout()
+		return
 	_show_bubble("(嗚… %s)" % reason, 3.0)
 
 func _show_bubble(text: String, seconds: float) -> void:
