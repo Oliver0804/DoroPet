@@ -93,7 +93,9 @@ var _capturing_hotkey: bool = false
 var _stt_local_rows: Array[Control] = []
 var _stt_cloud_rows: Array[Control] = []
 var _stt_bp_rows: Array[Control] = []
-const STT_ENGINES: Array = ["local", "api", "bailian"]
+var _stt_bpws_rows: Array[Control] = []
+var _stt_bp_key: LineEdit
+const STT_ENGINES: Array = ["local", "api", "bailian", "byteplus"]
 
 ## 自動更新
 var _auto_update_check: CheckBox
@@ -151,6 +153,7 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 	_voice_local_model.text = initial.get("voice_local_model", "")
 	var eng: String = initial.get("voice_engine", "local")
 	_voice_engine.select(maxi(0, STT_ENGINES.find(eng)))
+	_stt_bp_key.text = String(initial.get("bp_asr_key", ""))
 	_update_stt_visibility()
 	_tts_enabled.button_pressed = initial.get("tts_enabled", true)
 	_tts_volume_slider.value = float(initial.get("tts_volume", 1.0))
@@ -561,6 +564,7 @@ func _build_ui() -> void:
 	_voice_engine.add_item("本地 (whisper.cpp,免費離線)")
 	_voice_engine.add_item("雲端 API (OpenAI 兼容)")
 	_voice_engine.add_item("百炼雲端 (qwen3-asr-flash,快又準)")
+	_voice_engine.add_item("BytePlus 串流 (ASR 2.0,最快+繁體)")
 	_voice_engine.item_selected.connect(_on_voice_engine_changed)
 	eng_row.add_child(eng_cap)
 	eng_row.add_child(_voice_engine)
@@ -641,6 +645,21 @@ func _build_ui() -> void:
 	basr_hint.add_theme_font_size_override("font_size", 12)
 	vb.add_child(basr_hint)
 	_stt_bp_rows.append(basr_hint)
+
+	## --- BytePlus 串流 ASR 配置(選 BytePlus 時才顯示)---
+	var bpk_row: HBoxContainer = HBoxContainer.new()
+	var bpk_cap: Label = Label.new()
+	bpk_cap.text = "API Key"
+	bpk_cap.custom_minimum_size = Vector2(90, 0)
+	_stt_bp_key = LineEdit.new()
+	_stt_bp_key.secret = true
+	_stt_bp_key.placeholder_text = "BytePlus 語音控制台的 API Key"
+	_stt_bp_key.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_stt_bp_key.text_changed.connect(_on_text_changed)
+	bpk_row.add_child(bpk_cap)
+	bpk_row.add_child(_stt_bp_key)
+	vb.add_child(bpk_row)
+	_stt_bpws_rows.append(bpk_row)
 
 	## ---------- 🔊 TTS — 語音輸出 ----------
 	vb.add_child(_separator())
@@ -935,6 +954,7 @@ func _collect() -> Dictionary:
 		"distill_model": _distill_model_edit.text,
 		"persona": _persona_edit.text,
 		"voice_engine": STT_ENGINES[maxi(0, _voice_engine.selected)],
+		"bp_asr_key": _stt_bp_key.text,
 		"voice_api_key": _voice_api_key.text,
 		"voice_endpoint": _voice_endpoint.text,
 		"voice_model": _voice_model.text,
@@ -1082,6 +1102,8 @@ func _update_stt_visibility() -> void:
 		r.visible = sel == 1
 	for r in _stt_bp_rows:
 		r.visible = sel == 2
+	for r in _stt_bpws_rows:
+		r.visible = sel == 3
 
 ## ---------- 對話熱鍵 capture ----------
 func _refresh_hotkey_btn() -> void:

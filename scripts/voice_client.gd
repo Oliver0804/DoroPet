@@ -40,6 +40,11 @@ var _sample_rate: int = 0
 var _asr_http: HTTPRequest
 var _asr_busy: bool = false
 
+## --- BytePlus 串流 ASR 2.0（STT 第四引擎,WebSocket,最快+繁體輸出）---
+const ByteplusSTT := preload("res://scripts/byteplus_stt.gd")
+var _bp_stt: Node
+var _bp_asr_key: String = ""
+
 ## --- 雲端/本機生成式 TTS 後端（voicebox 本機 / bailian 雲端）---
 const VoiceboxTTS := preload("res://scripts/voicebox_tts.gd")
 const BailianTTS := preload("res://scripts/bailian_tts.gd")
@@ -53,7 +58,7 @@ var _vb_generating: bool = false
 var _vb_started_emitted: bool = false
 var _vb_pending_text: String = ""        ## 生成掛掉時 fallback 系統 TTS 用
 
-var _engine: String = "local"        ## "local" | "api" | "bailian"
+var _engine: String = "local"        ## "local" | "api" | "bailian" | "byteplus"
 var _api_key: String = ""
 var _endpoint: String = DEFAULT_STT_ENDPOINT
 var _model: String = DEFAULT_STT_MODEL
@@ -157,6 +162,12 @@ func _ready() -> void:
 	_asr_http.request_completed.connect(_on_asr_response)
 	add_child(_asr_http)
 
+	_bp_stt = ByteplusSTT.new()
+	_bp_stt.name = "ByteplusSTT"
+	_bp_stt.recognized.connect(_on_bp_stt_ok)
+	_bp_stt.failed.connect(_on_bp_stt_fail)
+	add_child(_bp_stt)
+
 	_bp = ByteplusTTS.new()
 	_bp.name = "ByteplusTTS"
 	_bp.chunk_ready.connect(_on_vb_chunk_ready)
@@ -166,7 +177,7 @@ func _ready() -> void:
 
 ## ---------- runtime 設定 ----------
 func set_engine(e: String) -> void:
-	if e in ["api", "local", "bailian"]:
+	if e in ["api", "local", "bailian", "byteplus"]:
 		_engine = e
 func get_engine() -> String: return _engine
 
@@ -230,6 +241,11 @@ func set_bp_cluster(c: String) -> void:
 func get_bp_cluster() -> String: return _bp.cluster
 func set_bp_speaker(s: String) -> void: _bp.speaker = s.strip_edges()
 func get_bp_speaker() -> String: return _bp.speaker
+func set_bp_asr_key(k: String) -> void:
+	_bp_asr_key = k.strip_edges()
+	if _bp_stt != null:
+		_bp_stt.api_key = _bp_asr_key
+func get_bp_asr_key() -> String: return _bp_asr_key
 
 func is_recording() -> bool: return _recording
 
@@ -288,6 +304,10 @@ func stt_status() -> String:
 		if _bl == null or _bl.api_key == "" or _bl.endpoint == "":
 			return "百炼：未設定（沿用 TTS 的百炼 Endpoint/Key）"
 		return "百炼 qwen3-asr-flash"
+	if _engine == "byteplus":
+		if _bp_asr_key == "":
+			return "BytePlus：未設定 API Key"
+		return "BytePlus 串流 ASR 2.0"
 	if _api_key == "":
 		return "雲端：未設定 OPENAI_API_KEY"
 	return "雲端 %s" % _model
@@ -297,6 +317,8 @@ func has_stt() -> bool:
 		return FileAccess.file_exists(_local_model) and FileAccess.file_exists(_local_bin)
 	if _engine == "bailian":
 		return _bl != null and _bl.api_key != "" and _bl.endpoint != ""
+	if _engine == "byteplus":
+		return _bp_asr_key != ""
 	return _api_key != ""
 
 ## ---------- 錄音 ----------
@@ -349,6 +371,8 @@ func stop_and_send() -> void:
 		_run_local_whisper(ProjectSettings.globalize_path(TMP_WAV))
 	elif _engine == "bailian":
 		_submit_bailian_asr(wav)
+	elif _engine == "byteplus":
+		_bp_stt.call("start", wav)
 	else:
 		_upload_wav(wav)
 
@@ -442,6 +466,21 @@ func _frames_to_wav(frames: PackedVector2Array, sr: int) -> PackedByteArray:
 		var v: int = int(round(s * 32767.0))
 		buf.encode_s16(44 + i * 2, v)
 	return buf
+
+## ---------- BytePlus 串流 ASR callback ----------
+func _on_bp_stt_ok(text: String) -> void:
+	var lat: int = Time.get_ticks_msec() - _stt_started_ms
+	if text == "":
+		DoroLogger.log("stt_error", {"engine": "byteplus", "reason": "empty", "latency_ms": lat})
+		stt_error.emit("沒辨識到內容")
+		return
+	DoroLogger.log("stt_response", {"engine": "byteplus", "text": text, "latency_ms": lat})
+	transcribed.emit(text)
+
+func _on_bp_stt_fail(reason: String) -> void:
+	DoroLogger.log("stt_error", {"engine": "byteplus", "reason": reason,
+		"latency_ms": Time.get_ticks_msec() - _stt_started_ms})
+	stt_error.emit("BytePlus ASR: " + reason)
 
 ## ---------- 百炼 qwen3-asr-flash（同步 HTTP,一來一回,實測 ~1.3s）----------
 func _submit_bailian_asr(wav: PackedByteArray) -> void:

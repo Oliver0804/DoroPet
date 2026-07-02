@@ -831,6 +831,7 @@ func _build_chat_ui() -> void:
 	_voice.call("set_bp_access_token", _config_get("voice", "bp_access_token", ""))
 	_voice.call("set_bp_cluster", _config_get("voice", "bp_cluster", ""))
 	_voice.call("set_bp_speaker", _config_get("voice", "bp_speaker", ""))
+	_voice.call("set_bp_asr_key", _config_get("voice", "bp_asr_key", ""))
 
 	## 錄音指示由 bubble 顯示（不再需要獨立 Label）
 
@@ -1295,6 +1296,7 @@ func _open_settings() -> void:
 		"bp_access_token": _voice.call("get_bp_access_token") if _voice else "",
 		"bp_cluster": _voice.call("get_bp_cluster") if _voice else "",
 		"bp_speaker": _voice.call("get_bp_speaker") if _voice else "",
+		"bp_asr_key": _voice.call("get_bp_asr_key") if _voice else "",
 		"hotkey_keycode": _hotkey_keycode,
 		"hotkey_mods": _hotkey_mods,
 		"vad_enabled": _vad_enabled,
@@ -1392,6 +1394,7 @@ func _on_settings_changed(data: Dictionary) -> void:
 		_voice.call("set_bp_access_token", data.get("bp_access_token", ""))
 		_voice.call("set_bp_cluster", data.get("bp_cluster", ""))
 		_voice.call("set_bp_speaker", data.get("bp_speaker", ""))
+		_voice.call("set_bp_asr_key", data.get("bp_asr_key", ""))
 	_save_config()
 
 ## ---------- 設定持久化 ----------
@@ -1484,4 +1487,5 @@ func _save_config() -> void:
 		cfg.set_value("voice", "bp_access_token", _voice.call("get_bp_access_token"))
 		cfg.set_value("voice", "bp_cluster", _voice.call("get_bp_cluster"))
 		cfg.set_value("voice", "bp_speaker", _voice.call("get_bp_speaker"))
+		cfg.set_value("voice", "bp_asr_key", _voice.call("get_bp_asr_key"))
 	cfg.save(CONFIG_PATH)
