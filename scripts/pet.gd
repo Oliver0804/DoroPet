@@ -842,6 +842,7 @@ func _build_chat_ui() -> void:
 	_voice.call("set_bp_speaker", _config_get("voice", "bp_speaker", ""))
 	_voice.call("set_bp_asr_key", _config_get("voice", "bp_asr_key", ""))
 	_voice.call("set_capture_system_audio", bool(_config_get("voice", "capture_system_audio", false)))
+	_voice.call("set_stt_hotwords", _config_get("voice", "stt_hotwords", ""))
 
 	## 錄音指示由 bubble 顯示（不再需要獨立 Label）
 
@@ -1345,6 +1346,7 @@ func _open_settings() -> void:
 		"bp_speaker": _voice.call("get_bp_speaker") if _voice else "",
 		"bp_asr_key": _voice.call("get_bp_asr_key") if _voice else "",
 		"capture_system_audio": _voice.call("is_capture_system_audio") if _voice else false,
+		"stt_hotwords": _voice.call("get_stt_hotwords") if _voice else "",
 		"hotkey_keycode": _hotkey_keycode,
 		"hotkey_mods": _hotkey_mods,
 		"vad_enabled": _vad_enabled,
@@ -1444,6 +1446,7 @@ func _on_settings_changed(data: Dictionary) -> void:
 		_voice.call("set_bp_speaker", data.get("bp_speaker", ""))
 		_voice.call("set_bp_asr_key", data.get("bp_asr_key", ""))
 		_voice.call("set_capture_system_audio", bool(data.get("capture_system_audio", false)))
+		_voice.call("set_stt_hotwords", data.get("stt_hotwords", ""))
 	_save_config()
 
 ## ---------- 設定持久化 ----------
@@ -1538,4 +1541,5 @@ func _save_config() -> void:
 		cfg.set_value("voice", "bp_speaker", _voice.call("get_bp_speaker"))
 		cfg.set_value("voice", "bp_asr_key", _voice.call("get_bp_asr_key"))
 		cfg.set_value("voice", "capture_system_audio", _voice.call("is_capture_system_audio"))
+		cfg.set_value("voice", "stt_hotwords", _voice.call("get_stt_hotwords"))
 	cfg.save(CONFIG_PATH)

@@ -246,6 +246,16 @@ func set_bp_asr_key(k: String) -> void:
 	if _bp_stt != null:
 		_bp_stt.api_key = _bp_asr_key
 func get_bp_asr_key() -> String: return _bp_asr_key
+func set_stt_hotwords(s: String) -> void:
+	## 逗號/頓號分隔的熱詞清單
+	var words: PackedStringArray = []
+	for w in s.replace("、", ",").replace("，", ",").split(","):
+		if w.strip_edges() != "":
+			words.append(w.strip_edges())
+	if _bp_stt != null:
+		_bp_stt.hotwords = words
+func get_stt_hotwords() -> String:
+	return "、".join(_bp_stt.hotwords) if _bp_stt != null else ""
 
 func is_recording() -> bool: return _recording
 

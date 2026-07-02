@@ -97,6 +97,7 @@ var _stt_cloud_rows: Array[Control] = []
 var _stt_bp_rows: Array[Control] = []
 var _stt_bpws_rows: Array[Control] = []
 var _stt_bp_key: LineEdit
+var _stt_hotwords: LineEdit
 const STT_ENGINES: Array = ["local", "api", "bailian", "byteplus"]
 
 ## 自動更新
@@ -158,6 +159,7 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 	var eng: String = initial.get("voice_engine", "local")
 	_voice_engine.select(maxi(0, STT_ENGINES.find(eng)))
 	_stt_bp_key.text = String(initial.get("bp_asr_key", ""))
+	_stt_hotwords.text = String(initial.get("stt_hotwords", ""))
 	_update_stt_visibility()
 	_tts_enabled.button_pressed = initial.get("tts_enabled", true)
 	_tts_volume_slider.value = float(initial.get("tts_volume", 1.0))
@@ -673,6 +675,20 @@ func _build_ui() -> void:
 	vb.add_child(bpk_row)
 	_stt_bpws_rows.append(bpk_row)
 
+	var hw_row: HBoxContainer = HBoxContainer.new()
+	var hw_cap: Label = Label.new()
+	hw_cap.text = "熱詞"
+	hw_cap.custom_minimum_size = Vector2(90, 0)
+	hw_cap.tooltip_text = "常被聽錯的專有名詞(人名/群名等),逗號分隔,辨識時優先匹配"
+	_stt_hotwords = LineEdit.new()
+	_stt_hotwords.placeholder_text = "洛狗、格洛、佐羅…(逗號或頓號分隔)"
+	_stt_hotwords.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_stt_hotwords.text_changed.connect(_on_text_changed)
+	hw_row.add_child(hw_cap)
+	hw_row.add_child(_stt_hotwords)
+	vb.add_child(hw_row)
+	_stt_bpws_rows.append(hw_row)
+
 	## ---------- 🔊 TTS — 語音輸出 ----------
 	vb.add_child(_separator())
 	vb.add_child(_section("🔊 TTS — 語音輸出"))
@@ -969,6 +985,7 @@ func _collect() -> Dictionary:
 		"persona": _persona_edit.text,
 		"voice_engine": STT_ENGINES[maxi(0, _voice_engine.selected)],
 		"bp_asr_key": _stt_bp_key.text,
+		"stt_hotwords": _stt_hotwords.text,
 		"capture_system_audio": _sys_audio_check.button_pressed,
 		"voice_api_key": _voice_api_key.text,
 		"voice_endpoint": _voice_endpoint.text,

@@ -16,6 +16,7 @@ const RESOURCE_ID: String = "volc.seedasr.sauc.duration"
 const TIMEOUT_MS: int = 12000
 
 var api_key: String = ""
+var hotwords: PackedStringArray = []   ## 常聽錯的專有名詞(洛狗、人名等)
 
 var _ws: WebSocketPeer
 var _wav: PackedByteArray
@@ -135,6 +136,13 @@ func _send_frames() -> void:
 			"force_to_speech_time": 1000,
 		},
 	}
+	if hotwords.size() > 0:
+		var hw: Array = []
+		for w in hotwords:
+			if String(w).strip_edges() != "":
+				hw.append({"word": String(w).strip_edges()})
+		if not hw.is_empty():
+			req["request"]["corpus"] = {"context": JSON.stringify({"hotwords": hw})}
 	## full client request(type 0b0001, JSON);等 ack 後才送音訊(見 _send_audio)
 	var err: int = _ws.send(_frame(0b0001, 0b0000, 0b0001, JSON.stringify(req).to_utf8_buffer()))
 	if err != OK:
