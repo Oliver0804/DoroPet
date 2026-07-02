@@ -47,6 +47,8 @@ var _voice_local_bin: LineEdit
 var _voice_local_model: LineEdit
 var _tts_voice: OptionButton
 var _tts_enabled: CheckBox
+var _tts_volume_slider: HSlider
+var _tts_volume_label: Label
 var _voice_status: Label
 
 ## TTS 後端（系統內建 / Voicebox）
@@ -139,6 +141,8 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 	_voice_engine.select(0 if eng == "local" else 1)
 	_update_stt_visibility()
 	_tts_enabled.button_pressed = initial.get("tts_enabled", true)
+	_tts_volume_slider.value = float(initial.get("tts_volume", 1.0))
+	_update_tts_volume_label(_tts_volume_slider.value)
 	var v: String = initial.get("tts_voice", "Mei-Jia")
 	for i in _tts_voice.item_count:
 		if _tts_voice.get_item_text(i) == v:
@@ -621,6 +625,25 @@ func _build_ui() -> void:
 	_tts_enabled.toggled.connect(_on_any_toggled)
 	vb.add_child(_tts_enabled)
 
+	## 音量(三後端共用)
+	var vol_row: HBoxContainer = HBoxContainer.new()
+	var vol_cap: Label = Label.new()
+	vol_cap.text = "音量"
+	vol_cap.custom_minimum_size = Vector2(90, 0)
+	_tts_volume_slider = HSlider.new()
+	_tts_volume_slider.min_value = 0.0
+	_tts_volume_slider.max_value = 1.0
+	_tts_volume_slider.step = 0.05
+	_tts_volume_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_tts_volume_slider.value_changed.connect(_on_any_changed)
+	_tts_volume_slider.value_changed.connect(_update_tts_volume_label)
+	_tts_volume_label = Label.new()
+	_tts_volume_label.custom_minimum_size = Vector2(50, 0)
+	vol_row.add_child(vol_cap)
+	vol_row.add_child(_tts_volume_slider)
+	vol_row.add_child(_tts_volume_label)
+	vb.add_child(vol_row)
+
 	## TTS 後端選擇
 	var be_row: HBoxContainer = HBoxContainer.new()
 	var be_cap: Label = Label.new()
@@ -792,6 +815,9 @@ func _update_scale_label(v: float) -> void:
 func _update_vad_threshold_label(v: float) -> void:
 	_vad_threshold_label.text = "%.3f" % v
 
+func _update_tts_volume_label(v: float) -> void:
+	_tts_volume_label.text = "%d%%" % int(round(v * 100.0))
+
 func _on_any_changed(_v: float) -> void:
 	_emit()
 
@@ -859,6 +885,7 @@ func _collect() -> Dictionary:
 		"voice_local_model": _voice_local_model.text,
 		"tts_voice": tts_v,
 		"tts_enabled": _tts_enabled.button_pressed,
+		"tts_volume": _tts_volume_slider.value,
 		"tts_backend": ["system", "voicebox", "bailian"][maxi(0, _tts_backend_sel.selected)],
 		"vb_endpoint": _vb_endpoint.text,
 		"vb_profile": _vb_saved_profile,

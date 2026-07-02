@@ -55,6 +55,7 @@ var _local_bin: String = ""
 var _local_model: String = ""        ## 完整路徑指向 ggml-*.bin
 var _voice: String = ""              ## 預設聲音(依 OS)
 var _tts_enabled: bool = true
+var _tts_volume: float = 1.0         ## 0..1 線性音量,套在 _tts_player 上(三後端共用)
 
 static func default_voice() -> String:
 	match OS.get_name():
@@ -127,6 +128,7 @@ func _ready() -> void:
 	_tts_spectrum = AudioServer.get_bus_effect_instance(_tts_bus_idx, 0) as AudioEffectSpectrumAnalyzerInstance
 	_tts_player = AudioStreamPlayer.new()
 	_tts_player.bus = "TTSBus"
+	_tts_player.volume_db = linear_to_db(maxf(_tts_volume, 0.001))
 	_tts_player.finished.connect(_on_player_finished)
 	add_child(_tts_player)
 
@@ -169,6 +171,13 @@ func set_voice(v: String) -> void:
 func get_voice() -> String: return _voice
 func set_tts_enabled(b: bool) -> void: _tts_enabled = b
 func is_tts_enabled() -> bool: return _tts_enabled
+
+func set_tts_volume(v: float) -> void:
+	_tts_volume = clamp(v, 0.0, 1.0)
+	if _tts_player != null:
+		## 0 會變 -inf dB,固定夾在 -60dB 當靜音底
+		_tts_player.volume_db = linear_to_db(maxf(_tts_volume, 0.001))
+func get_tts_volume() -> float: return _tts_volume
 
 func set_tts_backend(b: String) -> void:
 	if b == "system" or b == "voicebox" or b == "bailian":

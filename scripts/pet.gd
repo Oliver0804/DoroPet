@@ -813,6 +813,7 @@ func _build_chat_ui() -> void:
 	var v_voice: String = _config_get("voice", "tts_voice", "")
 	if v_voice != "": _voice.call("set_voice", v_voice)
 	_voice.call("set_tts_enabled", _config_get("voice", "tts_enabled", true))
+	_voice.call("set_tts_volume", float(_config_get("voice", "tts_volume", 1.0)))
 	_voice.call("set_tts_backend", _config_get("voice", "tts_backend", "system"))
 	_voice.call("set_vb_endpoint", _config_get("voice", "vb_endpoint", ""))
 	_voice.call("set_vb_profile", _config_get("voice", "vb_profile", ""))
@@ -1250,6 +1251,7 @@ func _open_settings() -> void:
 		"voice_local_model": _voice.call("get_local_model") if _voice else "",
 		"tts_voice": _voice.call("get_voice") if _voice else "Mei-Jia",
 		"tts_enabled": _voice.call("is_tts_enabled") if _voice else true,
+		"tts_volume": _voice.call("get_tts_volume") if _voice else 1.0,
 		"tts_backend": _voice.call("get_tts_backend") if _voice else "system",
 		"vb_endpoint": _voice.call("get_vb_endpoint") if _voice else "",
 		"vb_profile": _voice.call("get_vb_profile") if _voice else "",
@@ -1341,6 +1343,7 @@ func _on_settings_changed(data: Dictionary) -> void:
 		_voice.call("set_local_model", data.get("voice_local_model", ""))
 		_voice.call("set_voice", data.get("tts_voice", "Mei-Jia"))
 		_voice.call("set_tts_enabled", bool(data.get("tts_enabled", true)))
+		_voice.call("set_tts_volume", float(data.get("tts_volume", 1.0)))
 		_voice.call("set_tts_backend", data.get("tts_backend", "system"))
 		_voice.call("set_vb_endpoint", data.get("vb_endpoint", ""))
 		_voice.call("set_vb_profile", data.get("vb_profile", ""))
@@ -1427,6 +1430,7 @@ func _save_config() -> void:
 		cfg.set_value("voice", "local_model", _voice.call("get_local_model"))
 		cfg.set_value("voice", "tts_voice", _voice.call("get_voice"))
 		cfg.set_value("voice", "tts_enabled", _voice.call("is_tts_enabled"))
+		cfg.set_value("voice", "tts_volume", _voice.call("get_tts_volume"))
 		cfg.set_value("voice", "tts_backend", _voice.call("get_tts_backend"))
 		cfg.set_value("voice", "vb_endpoint", _voice.call("get_vb_endpoint"))
 		cfg.set_value("voice", "vb_profile", _voice.call("get_vb_profile"))
