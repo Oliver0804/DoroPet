@@ -24,10 +24,17 @@ const DISTILL_PROMPT: String = """你是 Doro(桌面寵物)的記憶整理器。
 規則:
 - 繁體中文、條列式(- 開頭)
 - 合併同類、去重;過時的事實用新的覆蓋
-- 總長不超過 1500 字,超過就淘汰最不重要的
-- 空間夠就保留細節(日期、具體專案名、原話中的關鍵詞),別過度濃縮
+- **總長嚴格不超過 1500 字**,超過就淘汰最不重要的
+- 別記瑣事:單次行為、口頭禪/打招呼方式列舉、一次性測試互動都不要;
+  重要的是身份、工作專案、偏好要求、人際關係(名字+關係)、帶日期的重要事件
 - 沒有新事實就原樣輸出既有筆記
 - 只輸出筆記內容本身,不要任何解釋、標題、code fence"""
+
+const COMPRESS_PROMPT: String = """你是記憶壓縮器。下面這份筆記過長,壓縮重寫:
+- 保留:身份/稱呼、工作專案、偏好與要求、人際關係(名字+關係)、帶日期的重要事件、警示事項
+- 刪除:單次行為描述、口頭禪/打招呼方式列舉、瑣碎測試互動;同類合併成一條
+- 條列式、繁體中文、總長不超過 1000 字
+- 只輸出筆記本身,不要解釋"""
 
 var _memory: String = ""
 var _since_distill: int = 0
@@ -104,27 +111,57 @@ func distill_now(history: Array, api_key: String, model: String) -> void:
 		_distilling = false
 		DoroLogger.log("memory_distill_error", {"reason": "HTTPRequest err=%d" % err})
 		return
-	_finish_distill()
+	_finish_distill(api_key, model)
 
-func _finish_distill() -> void:
+## 等一個 LLM 回覆,回筆記文字;失敗回空字串
+func _await_note() -> String:
 	var result: Array = await _http.request_completed
-	_distilling = false
 	var code: int = result[1]
 	var body: PackedByteArray = result[3]
 	if int(result[0]) != HTTPRequest.RESULT_SUCCESS or code < 200 or code >= 300:
 		DoroLogger.log("memory_distill_error", {"reason": "HTTP %d" % code})
-		return
+		return ""
 	var parsed: Variant = JSON.parse_string(body.get_string_from_utf8())
 	if typeof(parsed) != TYPE_DICTIONARY or not (parsed as Dictionary).has("choices"):
 		DoroLogger.log("memory_distill_error", {"reason": "bad json"})
-		return
+		return ""
 	var note: String = String(parsed["choices"][0]["message"].get("content", "")).strip_edges()
 	if note.begins_with("```"):
 		note = note.trim_prefix("```").trim_suffix("```").strip_edges()
+	return note
+
+func _finish_distill(api_key: String, model: String) -> void:
+	var note: String = await _await_note()
 	if note == "":
+		_distilling = false
 		return
+	## 超長 → 再跑一輪壓縮(LLM 挑重點),不要粗暴截斷
 	if note.length() > NOTE_MAX_CHARS:
-		note = note.substr(0, NOTE_MAX_CHARS)
+		DoroLogger.log("memory_compress", {"chars_before": note.length()})
+		var body: Dictionary = {
+			"model": model,
+			"messages": [
+				{"role": "system", "content": COMPRESS_PROMPT},
+				{"role": "user", "content": note},
+			],
+			"max_tokens": 1600,
+			"temperature": 0.2,
+		}
+		var headers: PackedStringArray = [
+			"Authorization: Bearer " + api_key,
+			"Content-Type: application/json",
+			"HTTP-Referer: https://github.com/Oliver0804/DoroPet",
+			"X-Title: DoroPet",
+		]
+		if _http.request(ENDPOINT, headers, HTTPClient.METHOD_POST, JSON.stringify(body)) == OK:
+			var compressed: String = await _await_note()
+			if compressed != "":
+				note = compressed
+	_distilling = false
+	## 最後保險:仍超長就在最後一個換行處截,不切斷句子
+	if note.length() > NOTE_MAX_CHARS:
+		var cut: int = note.rfind("\n", NOTE_MAX_CHARS)
+		note = note.substr(0, cut if cut > 200 else NOTE_MAX_CHARS)
 	_memory = note
 	_save_text(MEMORY_PATH, note)
 	_since_distill = 0
