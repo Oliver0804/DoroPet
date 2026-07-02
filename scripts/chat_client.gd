@@ -102,6 +102,7 @@ const MAX_HISTORY: int = 8                 ## 對話 context 上限（user+assis
 const TIMEOUT_SEC: float = 30.0
 
 const DoroLogger := preload("res://scripts/logger.gd")
+const MemoryStore := preload("res://scripts/memory_store.gd")
 const TOOLS_SCHEMA: Array = [
 	{
 		"type": "function",
@@ -147,6 +148,7 @@ var _in_flight: bool = false
 var _request_started_ms: int = 0
 var _round: int = 0
 var _pending_image_b64: String = ""              ## LLM call take_screenshot 後待塞的圖
+var _mem: Node                                   ## MemoryStore(歷史落盤 + 主人筆記)
 
 ## ---------- runtime 設定 ----------
 func set_api_key(k: String) -> void:
@@ -186,6 +188,11 @@ func _ready() -> void:
 	_tool_http = HTTPRequest.new()
 	_tool_http.timeout = 10.0
 	add_child(_tool_http)
+	_mem = MemoryStore.new()
+	_mem.name = "MemoryStore"
+	add_child(_mem)
+	## 上次的對話接著聊(短期記憶落盤)
+	_history = _mem.call("load_history")
 
 func is_enabled() -> bool:
 	return _api_key != ""
@@ -197,6 +204,11 @@ func get_status() -> String:
 
 func reset_history() -> void:
 	_history.clear()
+	if _mem != null:
+		_mem.call("clear_history")   ## 只清短期;長期筆記留著
+
+func get_memory() -> String:
+	return _mem.call("get_memory") if _mem != null else ""
 
 func send(user_text: String, image_b64: String = "") -> void:
 	if _in_flight:
@@ -211,8 +223,8 @@ func send(user_text: String, image_b64: String = "") -> void:
 	if _history.size() > MAX_HISTORY * 2:
 		_history = _history.slice(_history.size() - MAX_HISTORY * 2)
 
-	## 最終 system prompt = user 人設 + 系統規則(規則永遠 append,user 改不到)
-	var full_system: String = _persona.strip_edges() + "\n" + SYSTEM_RULES
+	## 最終 system prompt = user 人設 + 主人筆記(長期記憶) + 系統規則(規則永遠 append,user 改不到)
+	var full_system: String = _persona.strip_edges() + String(_mem.call("memory_section")) + "\n" + SYSTEM_RULES
 	var messages: Array = [{"role": "system", "content": full_system}]
 	if image_b64 == "":
 		messages.append_array(_history)
@@ -332,6 +344,7 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 	_in_flight = false
 	var reply: String = String(message.get("content", ""))
 	_history.append({"role": "assistant", "content": reply})
+	_mem.call("on_exchange", _history, _api_key, _model)   ## 落盤 + 累積夠就背景蒸餾
 	var clean: String = reply.strip_edges()
 	## 去掉可能的 ``` 或 ```json fence
 	if clean.begins_with("```"):
