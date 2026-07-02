@@ -68,6 +68,15 @@ var _bl_api_key: LineEdit
 var _bl_model: LineEdit
 var _bl_voice: LineEdit
 var _tts_bl_rows: Array[Control] = []
+
+## BytePlus 雲端 TTS
+var _bp_endpoint: LineEdit
+var _bp_api_key: LineEdit
+var _bp_resource_id: LineEdit
+var _bp_speaker: LineEdit
+var _tts_bp_rows: Array[Control] = []
+
+const TTS_BACKENDS: Array = ["system", "voicebox", "bailian", "byteplus"]
 var _voice_node: Node                    ## 直接拿到 VoiceClient 來查裝置 / 測試
 var _mic_device: OptionButton
 var _mic_test_btn: Button
@@ -149,11 +158,15 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 			_tts_voice.select(i)
 			break
 	var backend: String = String(initial.get("tts_backend", "system"))
-	_tts_backend_sel.select(2 if backend == "bailian" else (1 if backend == "voicebox" else 0))
+	_tts_backend_sel.select(maxi(0, TTS_BACKENDS.find(backend)))
 	_bl_endpoint.text = String(initial.get("bl_endpoint", ""))
 	_bl_api_key.text = String(initial.get("bl_api_key", ""))
 	_bl_model.text = String(initial.get("bl_model", ""))
 	_bl_voice.text = String(initial.get("bl_voice", ""))
+	_bp_endpoint.text = String(initial.get("bp_endpoint", ""))
+	_bp_api_key.text = String(initial.get("bp_api_key", ""))
+	_bp_resource_id.text = String(initial.get("bp_resource_id", ""))
+	_bp_speaker.text = String(initial.get("bp_speaker", ""))
 	_vb_endpoint.text = String(initial.get("vb_endpoint", ""))
 	_vb_saved_profile = String(initial.get("vb_profile", ""))
 	var msize: String = String(initial.get("vb_model_size", "0.6B"))
@@ -653,6 +666,7 @@ func _build_ui() -> void:
 	_tts_backend_sel.add_item("系統內建（快、音色普通）")     ## 0 = system
 	_tts_backend_sel.add_item("Voicebox（本機、克隆音色）")   ## 1 = voicebox
 	_tts_backend_sel.add_item("百炼雲端（快、克隆音色、要網路）")  ## 2 = bailian
+	_tts_backend_sel.add_item("BytePlus（快、克隆音色、要網路）")  ## 3 = byteplus
 	_tts_backend_sel.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_tts_backend_sel.item_selected.connect(_on_tts_backend_changed)
 	be_row.add_child(be_cap)
@@ -753,6 +767,34 @@ func _build_ui() -> void:
 	_bl_api_key = bl_edits[1]
 	_bl_model = bl_edits[2]
 	_bl_voice = bl_edits[3]
+
+	## --- BytePlus 配置（選 BytePlus 時才顯示）---
+	var bp_defs: Array = [
+		["Endpoint", "https://voice.ap-southeast-1.bytepluses.com", false],
+		["API Key", "BytePlus 語音控制台的 API Key", true],
+		["Resource ID", "volc.megatts.default（聲音復刻 2.0 合成）", false],
+		["Speaker ID", "S_...（克隆音色 ID）", false],
+	]
+	var bp_edits: Array[LineEdit] = []
+	for d in bp_defs:
+		var row: HBoxContainer = HBoxContainer.new()
+		var cap: Label = Label.new()
+		cap.text = d[0]
+		cap.custom_minimum_size = Vector2(90, 0)
+		var edit: LineEdit = LineEdit.new()
+		edit.placeholder_text = d[1]
+		edit.secret = d[2]
+		edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		edit.text_changed.connect(_on_text_changed)
+		row.add_child(cap)
+		row.add_child(edit)
+		vb.add_child(row)
+		_tts_bp_rows.append(row)
+		bp_edits.append(edit)
+	_bp_endpoint = bp_edits[0]
+	_bp_api_key = bp_edits[1]
+	_bp_resource_id = bp_edits[2]
+	_bp_speaker = bp_edits[3]
 
 	_vb_http = HTTPRequest.new()
 	_vb_http.timeout = 5.0
@@ -886,7 +928,7 @@ func _collect() -> Dictionary:
 		"tts_voice": tts_v,
 		"tts_enabled": _tts_enabled.button_pressed,
 		"tts_volume": _tts_volume_slider.value,
-		"tts_backend": ["system", "voicebox", "bailian"][maxi(0, _tts_backend_sel.selected)],
+		"tts_backend": TTS_BACKENDS[maxi(0, _tts_backend_sel.selected)],
 		"vb_endpoint": _vb_endpoint.text,
 		"vb_profile": _vb_saved_profile,
 		"vb_model_size": VB_MODEL_SIZES[maxi(0, _vb_model_size.selected)],
@@ -894,6 +936,10 @@ func _collect() -> Dictionary:
 		"bl_api_key": _bl_api_key.text,
 		"bl_model": _bl_model.text,
 		"bl_voice": _bl_voice.text,
+		"bp_endpoint": _bp_endpoint.text,
+		"bp_api_key": _bp_api_key.text,
+		"bp_resource_id": _bp_resource_id.text,
+		"bp_speaker": _bp_speaker.text,
 		"hotkey_keycode": _hotkey_keycode,
 		"hotkey_mods": _hotkey_mods,
 		"vad_enabled": _vad_check.button_pressed,
@@ -959,6 +1005,8 @@ func _update_tts_visibility() -> void:
 		r.visible = sel == 1
 	for r in _tts_bl_rows:
 		r.visible = sel == 2
+	for r in _tts_bp_rows:
+		r.visible = sel == 3
 
 func _vb_endpoint_or_default() -> String:
 	var e: String = _vb_endpoint.text.strip_edges()

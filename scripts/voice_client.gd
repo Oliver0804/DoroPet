@@ -39,9 +39,11 @@ var _sample_rate: int = 0
 ## --- 雲端/本機生成式 TTS 後端（voicebox 本機 / bailian 雲端）---
 const VoiceboxTTS := preload("res://scripts/voicebox_tts.gd")
 const BailianTTS := preload("res://scripts/bailian_tts.gd")
-var _tts_backend: String = "system"      ## "system"(say/PowerShell) | "voicebox" | "bailian"
+const ByteplusTTS := preload("res://scripts/byteplus_tts.gd")
+var _tts_backend: String = "system"      ## "system" | "voicebox" | "bailian" | "byteplus"
 var _vb: Node
 var _bl: Node
+var _bp: Node
 var _vb_queue: Array[String] = []        ## 已生成待播的 wav（user:// 路徑，兩後端共用）
 var _vb_generating: bool = false
 var _vb_started_emitted: bool = false
@@ -146,6 +148,13 @@ func _ready() -> void:
 	_bl.failed_first.connect(_on_vb_failed_first)
 	add_child(_bl)
 
+	_bp = ByteplusTTS.new()
+	_bp.name = "ByteplusTTS"
+	_bp.chunk_ready.connect(_on_vb_chunk_ready)
+	_bp.finished_generating.connect(_on_vb_finished_generating)
+	_bp.failed_first.connect(_on_vb_failed_first)
+	add_child(_bp)
+
 ## ---------- runtime 設定 ----------
 func set_engine(e: String) -> void:
 	if e == "api" or e == "local":
@@ -180,7 +189,7 @@ func set_tts_volume(v: float) -> void:
 func get_tts_volume() -> float: return _tts_volume
 
 func set_tts_backend(b: String) -> void:
-	if b == "system" or b == "voicebox" or b == "bailian":
+	if b in ["system", "voicebox", "bailian", "byteplus"]:
 		_tts_backend = b
 func get_tts_backend() -> String: return _tts_backend
 func set_vb_endpoint(e: String) -> void:
@@ -200,6 +209,16 @@ func set_bl_model(m: String) -> void:
 func get_bl_model() -> String: return _bl.model
 func set_bl_voice(v: String) -> void: _bl.voice = v.strip_edges()
 func get_bl_voice() -> String: return _bl.voice
+func set_bp_endpoint(e: String) -> void:
+	_bp.endpoint = e.strip_edges().rstrip("/") if e.strip_edges() != "" else "https://voice.ap-southeast-1.bytepluses.com"
+func get_bp_endpoint() -> String: return _bp.endpoint
+func set_bp_api_key(k: String) -> void: _bp.api_key = k.strip_edges()
+func get_bp_api_key() -> String: return _bp.api_key
+func set_bp_resource_id(r: String) -> void:
+	_bp.resource_id = r.strip_edges() if r.strip_edges() != "" else "volc.megatts.default"
+func get_bp_resource_id() -> String: return _bp.resource_id
+func set_bp_speaker(s: String) -> void: _bp.speaker = s.strip_edges()
+func get_bp_speaker() -> String: return _bp.speaker
 
 func is_recording() -> bool: return _recording
 
@@ -463,11 +482,11 @@ func speak(text: String) -> void:
 	if not _tts_enabled or text.strip_edges() == "":
 		return
 	stop_speaking()
-	if _tts_backend == "voicebox" or _tts_backend == "bailian":
+	if _tts_backend != "system":
 		_vb_pending_text = text
 		_vb_generating = true
 		_vb_started_emitted = false
-		var gen: Node = _vb if _tts_backend == "voicebox" else _bl
+		var gen: Node = {"voicebox": _vb, "bailian": _bl, "byteplus": _bp}[_tts_backend]
 		gen.call("start", text)
 		return
 	_speak_system(text)
@@ -606,6 +625,8 @@ func stop_speaking() -> void:
 		_vb.call("cancel")
 	if _bl != null:
 		_bl.call("cancel")
+	if _bp != null:
+		_bp.call("cancel")
 	_vb_generating = false
 	_vb_queue.clear()
 	if _tts_player != null and _tts_player.playing:
