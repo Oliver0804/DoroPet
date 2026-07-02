@@ -1153,20 +1153,21 @@ func _on_tts_finished() -> void:
 			_vad_silence_t = 0.0
 			_voice.call("start_recording")
 		elif _voice != null and _voice.call("is_recording") and not _vad_has_spoken:
+			## 麥克風不停不重啟(同幀 stop→play 會讓輸入串流掛掉),只清殘響 buffer
 			if _barge_t > 0.05:
-				## 播完瞬間主人正在開口(還沒到插話門檻)→ 保留 buffer 接著聽,別吃字
+				## 播完瞬間主人正在開口 → 保留 buffer 接著聽,別吃字
 				_vad_has_spoken = true
-				_vad_silence_t = 0.0
-				_recording_ui = true
-				_bubble_timer.stop()
-				_update_recording_bubble(0.0)
-				_bubble_window.show()
 			else:
-				## 播放期間累積的是 Doro 自己的殘響 → 重開清空 buffer
-				_voice.call("abort_recording")
-				_vad_silence_t = 0.0
-				_voice.call("start_recording")
+				_voice.call("flush_recording_buffer")   ## 清掉 Doro 自己的殘響
+			_vad_silence_t = 0.0
 			_barge_t = 0.0
+			## 手動切到錄音 UI(當初 recording_started 發生在 TTS 中,被略過)
+			_recording_ui = true
+			_bubble_timer.stop()
+			_bubble_window.size = Vector2i(380, 78)
+			_update_recording_bubble(0.0)
+			_bubble_window.show()
+			_reposition_bubble()
 		## 起一個較長的 timeout(user 不講話超過 _continuous_timeout_sec 才真關)
 		_start_continuous_timeout()
 
