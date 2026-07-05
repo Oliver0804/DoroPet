@@ -109,6 +109,11 @@ var _proactive_min_spin: SpinBox
 var _proactive_max_spin: SpinBox
 var _proactive_prompt_edit: TextEdit
 var _proactive_screenshot_check: CheckBox
+var _idle_voice_check: CheckBox
+var _idle_voice_min_spin: SpinBox
+var _idle_voice_max_spin: SpinBox
+var _idle_voice_status: Label
+var _memory_viewer: Window
 
 ## VAD
 var _vad_check: CheckBox
@@ -198,6 +203,11 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 	_proactive_prompt_edit.text = String(initial.get("proactive_prompt", ""))
 	_proactive_prompt_edit.placeholder_text = String(initial.get("proactive_prompt_default", ""))
 	_proactive_screenshot_check.button_pressed = bool(initial.get("proactive_with_screenshot", false))
+	_idle_voice_check.button_pressed = bool(initial.get("idle_voice_enabled", true))
+	_idle_voice_min_spin.value = float(initial.get("idle_voice_min_sec", 180.0))
+	_idle_voice_max_spin.value = float(initial.get("idle_voice_max_sec", 600.0))
+	var iv_count: int = int(initial.get("idle_voice_count", 0))
+	_idle_voice_status.text = "  已預錄 %d 句" % iv_count if iv_count > 0 else "  ⚠ 找不到 res://assets/voice_idle/manifest.json"
 	_vad_check.button_pressed = bool(initial.get("vad_enabled", true))
 	_vad_threshold_slider.value = float(initial.get("vad_threshold", 0.02))
 	_vad_silence_spin.value = float(initial.get("vad_silence_sec", 1.2))
@@ -522,6 +532,49 @@ func _build_ui() -> void:
 	_proactive_screenshot_check.text = "  📸 主動搭話時自動附帶當下螢幕(需勾上方視覺)"
 	_proactive_screenshot_check.toggled.connect(_on_any_toggled)
 	vb.add_child(_proactive_screenshot_check)
+
+	## 隨機念話(pre-generated wav,不走 LLM)
+	_idle_voice_check = CheckBox.new()
+	_idle_voice_check.text = "🔊 Doro 隨機念句話(用預錄好的音檔,不消耗 API)"
+	_idle_voice_check.toggled.connect(_on_any_toggled)
+	vb.add_child(_idle_voice_check)
+
+	var iv_row: HBoxContainer = HBoxContainer.new()
+	var iv_cap: Label = Label.new()
+	iv_cap.text = "  間隔"
+	iv_cap.custom_minimum_size = Vector2(80, 0)
+	_idle_voice_min_spin = SpinBox.new()
+	_idle_voice_min_spin.min_value = 30
+	_idle_voice_min_spin.max_value = 3600
+	_idle_voice_min_spin.step = 30
+	_idle_voice_min_spin.suffix = " 秒"
+	_idle_voice_min_spin.value_changed.connect(_on_any_changed)
+	var iv_dash: Label = Label.new()
+	iv_dash.text = " ~ "
+	_idle_voice_max_spin = SpinBox.new()
+	_idle_voice_max_spin.min_value = 30
+	_idle_voice_max_spin.max_value = 7200
+	_idle_voice_max_spin.step = 30
+	_idle_voice_max_spin.suffix = " 秒"
+	_idle_voice_max_spin.value_changed.connect(_on_any_changed)
+	iv_row.add_child(iv_cap)
+	iv_row.add_child(_idle_voice_min_spin)
+	iv_row.add_child(iv_dash)
+	iv_row.add_child(_idle_voice_max_spin)
+	vb.add_child(iv_row)
+
+	_idle_voice_status = Label.new()
+	_idle_voice_status.add_theme_color_override("font_color", Color(0.5, 0.5, 0.5))
+	_idle_voice_status.add_theme_font_size_override("font_size", 12)
+	vb.add_child(_idle_voice_status)
+
+	## 檢視 Doro 記憶
+	var mem_row: HBoxContainer = HBoxContainer.new()
+	var mem_btn: Button = Button.new()
+	mem_btn.text = "🧠 檢視 / 清空 Doro 記憶"
+	mem_btn.pressed.connect(_open_memory_viewer)
+	mem_row.add_child(mem_btn)
+	vb.add_child(mem_row)
 
 	## ---------- 🎙 STT — 語音輸入 ----------
 	vb.add_child(_separator())
@@ -1017,6 +1070,9 @@ func _collect() -> Dictionary:
 		"proactive_chat_max_sec": _proactive_max_spin.value,
 		"proactive_prompt": _proactive_prompt_edit.text,
 		"proactive_with_screenshot": _proactive_screenshot_check.button_pressed,
+		"idle_voice_enabled": _idle_voice_check.button_pressed,
+		"idle_voice_min_sec": _idle_voice_min_spin.value,
+		"idle_voice_max_sec": _idle_voice_max_spin.value,
 		"vad_threshold": _vad_threshold_slider.value,
 		"vad_silence_sec": _vad_silence_spin.value,
 		"continuous_voice": _continuous_voice_check.button_pressed,
@@ -1054,6 +1110,148 @@ func _on_close() -> void:
 		_mic_test_btn.button_pressed = false
 	_emit()
 	hide()
+
+## ---------- 記憶檢視器 ----------
+const MEMORY_FILES: Array = [
+	{"title": "🧠 事實帳本", "path": "user://doro_facts.jsonl",
+	 "hint": "Doro 從對話蒸餾出來的長期記憶,每行一條 JSON"},
+	{"title": "💬 短期歷史", "path": "user://doro_history.json",
+	 "hint": "最近對話原文,做為上下文回饋"},
+	{"title": "📦 已歸檔事實", "path": "user://doro_archive.jsonl",
+	 "hint": "已刪除 / 過期的舊事實,可被 recall 翻回來"},
+	{"title": "📄 v1 舊筆記", "path": "user://doro_memory.txt",
+	 "hint": "遷移前的舊格式(僅供對照)"},
+]
+var _mem_tabs: TabContainer
+var _mem_edits: Array = []
+
+func _open_memory_viewer() -> void:
+	if _memory_viewer == null:
+		_build_memory_viewer()
+	_reload_memory_viewer()
+	_memory_viewer.popup_centered()
+
+func _build_memory_viewer() -> void:
+	_memory_viewer = Window.new()
+	_memory_viewer.title = "Doro 的記憶"
+	_memory_viewer.size = Vector2i(720, 540)
+	_memory_viewer.close_requested.connect(_memory_viewer.hide)
+	add_child(_memory_viewer)
+
+	var vb: VBoxContainer = VBoxContainer.new()
+	vb.anchor_right = 1.0
+	vb.anchor_bottom = 1.0
+	vb.offset_left = 12
+	vb.offset_top = 12
+	vb.offset_right = -12
+	vb.offset_bottom = -12
+	_memory_viewer.add_child(vb)
+
+	_mem_tabs = TabContainer.new()
+	_mem_tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	vb.add_child(_mem_tabs)
+
+	_mem_edits.clear()
+	for i in range(MEMORY_FILES.size()):
+		var spec: Dictionary = MEMORY_FILES[i]
+		var page: VBoxContainer = VBoxContainer.new()
+		page.name = String(spec.get("title", "?"))
+		var hint: Label = Label.new()
+		hint.text = String(spec.get("hint", ""))
+		hint.add_theme_color_override("font_color", Color(0.55, 0.55, 0.55))
+		hint.add_theme_font_size_override("font_size", 12)
+		page.add_child(hint)
+		var edit: TextEdit = TextEdit.new()
+		edit.editable = false
+		edit.wrap_mode = TextEdit.LINE_WRAPPING_BOUNDARY
+		edit.size_flags_vertical = Control.SIZE_EXPAND_FILL
+		page.add_child(edit)
+		_mem_tabs.add_child(page)
+		_mem_edits.append(edit)
+
+	var btn_row: HBoxContainer = HBoxContainer.new()
+	var reload_btn: Button = Button.new()
+	reload_btn.text = "🔄 重新載入"
+	reload_btn.pressed.connect(_reload_memory_viewer)
+	var open_btn: Button = Button.new()
+	open_btn.text = "📂 開啟資料夾"
+	open_btn.pressed.connect(_open_memory_folder)
+	var clear_btn: Button = Button.new()
+	clear_btn.text = "🗑 清空目前分頁(不可復原)"
+	clear_btn.pressed.connect(_confirm_clear_current_memory)
+	var spacer: Control = Control.new()
+	spacer.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	var close_btn: Button = Button.new()
+	close_btn.text = "關閉"
+	close_btn.pressed.connect(_memory_viewer.hide)
+	btn_row.add_child(reload_btn)
+	btn_row.add_child(open_btn)
+	btn_row.add_child(clear_btn)
+	btn_row.add_child(spacer)
+	btn_row.add_child(close_btn)
+	vb.add_child(btn_row)
+
+func _reload_memory_viewer() -> void:
+	if _memory_viewer == null:
+		return
+	for i in range(MEMORY_FILES.size()):
+		var spec: Dictionary = MEMORY_FILES[i]
+		var path: String = String(spec["path"])
+		var edit: TextEdit = _mem_edits[i]
+		var f: FileAccess = FileAccess.open(path, FileAccess.READ)
+		if f == null:
+			edit.text = "(檔案不存在:%s)" % path
+			continue
+		var raw: String = f.get_as_text()
+		f.close()
+		if raw.strip_edges() == "":
+			edit.text = "(空的)"
+		elif path.ends_with(".jsonl"):
+			edit.text = _pretty_jsonl(raw)
+		elif path.ends_with(".json"):
+			edit.text = _pretty_json(raw)
+		else:
+			edit.text = raw
+
+func _pretty_json(raw: String) -> String:
+	var parsed: Variant = JSON.parse_string(raw)
+	if parsed == null:
+		return raw
+	return JSON.stringify(parsed, "  ")
+
+func _pretty_jsonl(raw: String) -> String:
+	var out: String = ""
+	for line in raw.split("\n"):
+		var s: String = line.strip_edges()
+		if s == "":
+			continue
+		var parsed: Variant = JSON.parse_string(s)
+		if parsed == null:
+			out += s + "\n"
+		else:
+			out += JSON.stringify(parsed, "  ") + "\n---\n"
+	return out.strip_edges()
+
+func _open_memory_folder() -> void:
+	var dir: String = ProjectSettings.globalize_path("user://")
+	OS.shell_open(dir)
+
+func _confirm_clear_current_memory() -> void:
+	var idx: int = _mem_tabs.current_tab if _mem_tabs != null else -1
+	if idx < 0 or idx >= MEMORY_FILES.size():
+		return
+	var spec: Dictionary = MEMORY_FILES[idx]
+	var path: String = String(spec["path"])
+	var confirm: AcceptDialog = ConfirmationDialog.new()
+	confirm.dialog_text = "確定要清空「%s」?\n\n檔案:%s\n這個動作無法復原。" % [String(spec["title"]), path]
+	confirm.confirmed.connect(func():
+		var abs: String = ProjectSettings.globalize_path(path)
+		if FileAccess.file_exists(path):
+			DirAccess.remove_absolute(abs)
+		_reload_memory_viewer()
+	)
+	add_child(confirm)
+	confirm.popup_centered()
 
 ## ---------- TTS 後端切換 / Voicebox profiles ----------
 const VB_MODEL_SIZES: Array = ["0.6B", "1.7B"]

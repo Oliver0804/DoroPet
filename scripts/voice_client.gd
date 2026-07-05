@@ -825,6 +825,21 @@ func is_speaking() -> bool:
 		return true
 	return _vb_generating or not _vb_queue.is_empty()
 
+## 播放預先生成的靜態 wav(idle 語音、按鈕音效等)。
+## 忙碌中就跳過並回 false;成功會發 speaking_started,播完發 speaking_finished。
+func play_static_wav(path: String) -> bool:
+	if is_speaking():
+		return false
+	if _tts_player == null:
+		return false
+	var stream: AudioStreamWAV = _load_wav_as_stream(path)
+	if stream == null:
+		return false
+	_tts_player.stream = stream
+	_tts_player.play()
+	speaking_started.emit()
+	return true
+
 func stop_speaking() -> void:
 	if _vb != null:
 		_vb.call("cancel")

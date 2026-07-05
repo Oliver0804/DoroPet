@@ -109,6 +109,15 @@ var _proactive_with_screenshot: bool = false    ## 主動搭話時自動拍螢�
 var _proactive_timer: Timer
 const DEFAULT_PROACTIVE_PROMPT: String = "(系統提示:主人靜默了一段時間,你主動找他/她聊個有趣或關心的話題,維持 30 字內。話題可以是天氣、時間、最近有沒有累、想吃什麼等貼心關懷,或分享你今天的『心情』。)"
 
+## Doro idle 語音(播預先生成好的 wav,不走 LLM/TTS)
+var _idle_voice_enabled: bool = true
+var _idle_voice_min_sec: float = 180.0    ## 3 分鐘
+var _idle_voice_max_sec: float = 600.0    ## 10 分鐘
+var _idle_voice_timer: Timer
+var _idle_voice_manifest: Array[Dictionary] = []
+const IDLE_VOICE_MANIFEST_PATH: String = "res://assets/voice_idle/manifest.json"
+const IDLE_VOICE_DIR: String = "res://assets/voice_idle/"
+
 ## 系統匣 / menu bar 圖示
 var _tray_id: int = -1
 var _tray_menu: PopupMenu
@@ -171,6 +180,7 @@ func _ready() -> void:
 	_setup_updater()
 	_setup_tray()
 	_setup_proactive_chat()
+	_setup_idle_voice()
 
 ## ---------- 主動搭話 ----------
 func _setup_proactive_chat() -> void:
@@ -209,6 +219,63 @@ func _on_proactive_timer() -> void:
 	_show_bubble("💭 Doro 想說話…", 999.0)
 	_chat.call("send", p, img)
 	_schedule_proactive()
+
+## ---------- Doro 隨機念話(pre-generated wav) ----------
+func _setup_idle_voice() -> void:
+	_load_idle_voice_manifest()
+	_idle_voice_timer = Timer.new()
+	_idle_voice_timer.one_shot = true
+	_idle_voice_timer.timeout.connect(_on_idle_voice_timer)
+	add_child(_idle_voice_timer)
+	if _idle_voice_enabled and _idle_voice_manifest.size() > 0:
+		_schedule_idle_voice()
+
+func _load_idle_voice_manifest() -> void:
+	_idle_voice_manifest.clear()
+	var f: FileAccess = FileAccess.open(IDLE_VOICE_MANIFEST_PATH, FileAccess.READ)
+	if f == null:
+		return
+	var raw: String = f.get_as_text()
+	f.close()
+	var parsed: Variant = JSON.parse_string(raw)
+	if typeof(parsed) != TYPE_DICTIONARY:
+		return
+	var arr: Variant = parsed.get("phrases", [])
+	if typeof(arr) != TYPE_ARRAY:
+		return
+	for it in arr:
+		if typeof(it) == TYPE_DICTIONARY and it.has("wav") and it.has("text"):
+			_idle_voice_manifest.append(it)
+	DoroLogger.log("idle_voice_manifest", {"count": _idle_voice_manifest.size()})
+
+func _schedule_idle_voice() -> void:
+	if _idle_voice_timer == null or not _idle_voice_enabled or _idle_voice_manifest.is_empty():
+		return
+	var sec: float = randf_range(_idle_voice_min_sec, _idle_voice_max_sec)
+	_idle_voice_timer.start(sec)
+
+func _on_idle_voice_timer() -> void:
+	## 忙碌狀態就跳過本輪
+	if not _idle_voice_enabled or _idle_voice_manifest.is_empty():
+		return
+	var busy: bool = _thinking \
+		or (_input_window != null and _input_window.visible) \
+		or (_bubble_window != null and _bubble_window.visible) \
+		or (_voice != null and _voice.call("is_speaking"))
+	if busy:
+		_schedule_idle_voice()
+		return
+	var pick: Dictionary = _idle_voice_manifest[randi() % _idle_voice_manifest.size()]
+	var wav_path: String = IDLE_VOICE_DIR + String(pick.get("wav", ""))
+	var text: String = String(pick.get("text", ""))
+	if wav_path.ends_with("/") or text.is_empty():
+		_schedule_idle_voice()
+		return
+	DoroLogger.log("idle_voice_play", {"wav": pick.get("wav"), "text": text})
+	_show_bubble(text, maxf(_bubble_seconds, 3.0))
+	if _voice != null:
+		_voice.call("play_static_wav", wav_path)
+	_schedule_idle_voice()
 
 ## ---------- 結束 ----------
 
@@ -1424,6 +1491,10 @@ func _open_settings() -> void:
 		"proactive_prompt": _proactive_prompt,
 		"proactive_prompt_default": DEFAULT_PROACTIVE_PROMPT,
 		"proactive_with_screenshot": _proactive_with_screenshot,
+		"idle_voice_enabled": _idle_voice_enabled,
+		"idle_voice_min_sec": _idle_voice_min_sec,
+		"idle_voice_max_sec": _idle_voice_max_sec,
+		"idle_voice_count": _idle_voice_manifest.size(),
 	}
 	_settings.open(data, _chat.call("get_status"), _voice.call("stt_status") if _voice else "")
 
@@ -1475,6 +1546,15 @@ func _on_settings_changed(data: Dictionary) -> void:
 			_schedule_proactive()
 		elif _proactive_timer:
 			_proactive_timer.stop()
+	var new_idle_voice: bool = bool(data.get("idle_voice_enabled", _idle_voice_enabled))
+	_idle_voice_min_sec = float(data.get("idle_voice_min_sec", _idle_voice_min_sec))
+	_idle_voice_max_sec = float(data.get("idle_voice_max_sec", _idle_voice_max_sec))
+	if new_idle_voice != _idle_voice_enabled:
+		_idle_voice_enabled = new_idle_voice
+		if _idle_voice_enabled:
+			_schedule_idle_voice()
+		elif _idle_voice_timer:
+			_idle_voice_timer.stop()
 	_apply_scale()
 	get_window().always_on_top = _always_on_top
 	if _chat:
@@ -1544,6 +1624,9 @@ func _load_config() -> void:
 	_proactive_chat_max_sec = float(cfg.get_value("pet", "proactive_chat_max_sec", _proactive_chat_max_sec))
 	_proactive_prompt = String(cfg.get_value("pet", "proactive_prompt", _proactive_prompt))
 	_proactive_with_screenshot = bool(cfg.get_value("pet", "proactive_with_screenshot", _proactive_with_screenshot))
+	_idle_voice_enabled = bool(cfg.get_value("pet", "idle_voice_enabled", _idle_voice_enabled))
+	_idle_voice_min_sec = float(cfg.get_value("pet", "idle_voice_min_sec", _idle_voice_min_sec))
+	_idle_voice_max_sec = float(cfg.get_value("pet", "idle_voice_max_sec", _idle_voice_max_sec))
 
 func _save_config() -> void:
 	var cfg: ConfigFile = ConfigFile.new()
@@ -1572,6 +1655,9 @@ func _save_config() -> void:
 	cfg.set_value("pet", "proactive_chat_max_sec", _proactive_chat_max_sec)
 	cfg.set_value("pet", "proactive_prompt", _proactive_prompt)
 	cfg.set_value("pet", "proactive_with_screenshot", _proactive_with_screenshot)
+	cfg.set_value("pet", "idle_voice_enabled", _idle_voice_enabled)
+	cfg.set_value("pet", "idle_voice_min_sec", _idle_voice_min_sec)
+	cfg.set_value("pet", "idle_voice_max_sec", _idle_voice_max_sec)
 	if _chat:
 		cfg.set_value("chat", "api_key", _chat.call("get_api_key"))
 		cfg.set_value("chat", "model", _chat.call("get_model"))

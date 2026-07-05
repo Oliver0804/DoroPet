@@ -1,0 +1,214 @@
+{
+  "phrases": [
+    {
+      "wav": "idle_01.wav",
+      "text": "欸欸主人~",
+      "category": "greeting",
+      "emotion": 10
+    },
+    {
+      "wav": "idle_02.wav",
+      "text": "哈囉~ Doro 在這喔",
+      "category": "greeting",
+      "emotion": 10
+    },
+    {
+      "wav": "idle_03.wav",
+      "text": "主人主人!",
+      "category": "greeting",
+      "emotion": 10
+    },
+    {
+      "wav": "idle_04.wav",
+      "text": "嘿嘿~ 我來啦",
+      "category": "greeting",
+      "emotion": 8
+    },
+    {
+      "wav": "idle_05.wav",
+      "text": "哇~ 主人!",
+      "category": "greeting",
+      "emotion": 8
+    },
+    {
+      "wav": "idle_06.wav",
+      "text": "主人回來啦?",
+      "category": "greeting",
+      "emotion": 10
+    },
+    {
+      "wav": "idle_07.wav",
+      "text": "好無聊喔~",
+      "category": "bored",
+      "emotion": 4
+    },
+    {
+      "wav": "idle_08.wav",
+      "text": "Doro 想被摸摸",
+      "category": "bored",
+      "emotion": 10
+    },
+    {
+      "wav": "idle_09.wav",
+      "text": "主人在幹嘛啦",
+      "category": "bored",
+      "emotion": 5
+    },
+    {
+      "wav": "idle_10.wav",
+      "text": "唔... 沒事做",
+      "category": "bored",
+      "emotion": 4
+    },
+    {
+      "wav": "idle_11.wav",
+      "text": "好想睡喔~",
+      "category": "bored",
+      "emotion": 12
+    },
+    {
+      "wav": "idle_12.wav",
+      "text": "欸,主人?",
+      "category": "bored",
+      "emotion": 5
+    },
+    {
+      "wav": "idle_13.wav",
+      "text": "抱抱~",
+      "category": "sulky",
+      "emotion": 10
+    },
+    {
+      "wav": "idle_14.wav",
+      "text": "主人陪我玩嘛",
+      "category": "sulky",
+      "emotion": 10
+    },
+    {
+      "wav": "idle_15.wav",
+      "text": "哼~ 不理你了",
+      "category": "sulky",
+      "emotion": 1
+    },
+    {
+      "wav": "idle_16.wav",
+      "text": "Doro 也想要嘛~",
+      "category": "sulky",
+      "emotion": 10
+    },
+    {
+      "wav": "idle_17.wav",
+      "text": "摸摸頭~",
+      "category": "sulky",
+      "emotion": 10
+    },
+    {
+      "wav": "idle_18.wav",
+      "text": "主人偏心啦!",
+      "category": "sulky",
+      "emotion": 1
+    },
+    {
+      "wav": "idle_19.wav",
+      "text": "主人記得喝水喔",
+      "category": "care",
+      "emotion": 8
+    },
+    {
+      "wav": "idle_20.wav",
+      "text": "別太累啦~",
+      "category": "care",
+      "emotion": 10
+    },
+    {
+      "wav": "idle_21.wav",
+      "text": "要不要休息一下?",
+      "category": "care",
+      "emotion": 8
+    },
+    {
+      "wav": "idle_22.wav",
+      "text": "主人有沒有吃飯?",
+      "category": "care",
+      "emotion": 8
+    },
+    {
+      "wav": "idle_23.wav",
+      "text": "眼睛會壞掉喔",
+      "category": "care",
+      "emotion": 10
+    },
+    {
+      "wav": "idle_24.wav",
+      "text": "起來動一動嘛",
+      "category": "care",
+      "emotion": 8
+    },
+    {
+      "wav": "idle_25.wav",
+      "text": "媽的",
+      "category": "catchphrase",
+      "emotion": 1
+    },
+    {
+      "wav": "idle_26.wav",
+      "text": "欸?",
+      "category": "catchphrase",
+      "emotion": 5
+    },
+    {
+      "wav": "idle_27.wav",
+      "text": "唔...",
+      "category": "catchphrase",
+      "emotion": 4
+    },
+    {
+      "wav": "idle_28.wav",
+      "text": "嘿嘿",
+      "category": "catchphrase",
+      "emotion": 9
+    },
+    {
+      "wav": "idle_29.wav",
+      "text": "哼!",
+      "category": "catchphrase",
+      "emotion": 1
+    },
+    {
+      "wav": "idle_30.wav",
+      "text": "哎唷~",
+      "category": "catchphrase",
+      "emotion": 5
+    },
+    {
+      "wav": "idle_31.wav",
+      "text": "哇!",
+      "category": "surprise",
+      "emotion": 5
+    },
+    {
+      "wav": "idle_32.wav",
+      "text": "欸?!",
+      "category": "surprise",
+      "emotion": 5
+    },
+    {
+      "wav": "idle_33.wav",
+      "text": "咦?",
+      "category": "surprise",
+      "emotion": 5
+    },
+    {
+      "wav": "idle_34.wav",
+      "text": "誒?",
+      "category": "surprise",
+      "emotion": 5
+    },
+    {
+      "wav": "idle_35.wav",
+      "text": "天啊~",
+      "category": "surprise",
+      "emotion": 8
+    }
+  ]
+}
