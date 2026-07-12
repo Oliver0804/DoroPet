@@ -23,7 +23,7 @@ const DoroLogger := preload("res://scripts/logger.gd")
 const TYPE_LABELS: Dictionary = {
 	"identity": "身份/稱呼", "project": "工作/專案", "preference": "偏好與要求",
 	"relation": "人際關係", "event": "重要事件", "warning": "警示",
-	"habit": "習慣", "speech": "主人語癖(口頭禪/常用詞)", "other": "其他",
+	"habit": "習慣", "speech": "口頭禪/常用詞", "other": "其他",
 }
 const TYPE_ORDER: PackedStringArray = [
 	"identity", "project", "preference", "relation", "warning", "habit", "speech", "event", "other"]
@@ -67,10 +67,10 @@ func memory_section() -> String:
 	var body: String = _render_facts()
 	if body.strip_edges() == "":
 		return ""
-	var out: String = "\n\n# 關於主人的記憶(你之前累積的筆記,自然運用,別逐條背誦)\n" + body + "\n"
-	if body.contains("【主人語癖"):
-		out += "(【主人語癖】裡的詞,你可以偶爾自然地學著用——像寵物學主人講話;" \
-			+ "頻率要低、用得順口,別每句都塞)\n"
+	## 整段標題已限定「關於主人」,下面條列都省略主詞;讀時把每條當「主人 <該條>」理解
+	var out: String = "\n\n# 關於主人(累積的筆記,自然運用,別逐條背誦)\n" + body + "\n"
+	if body.contains("【口頭禪"):
+		out += "(【口頭禪】那些詞可以偶爾自然學來用—頻率低、別每句都塞)\n"
 	return out
 
 const MEMORY_SECTION_MAX_CHARS: int = 2500   ## 注入 prompt 的記憶段上限,超過就精簡
@@ -123,10 +123,43 @@ func _format_groups(groups: Dictionary, per_type_cap: Dictionary) -> String:
 			var date_tag: String = ""
 			if t == "event":
 				date_tag = "(%s)" % String(f.get("created", ""))
-			out += "- %s%s\n" % [String(f.get("text", "")), date_tag]
+			out += "- %s%s\n" % [_strip_owner_prefix(String(f.get("text", ""))), date_tag]
 		if cap >= 0 and arr.size() > cap:
 			out += "  (…另有 %d 條省略)\n" % (arr.size() - cap)
 	return out
+
+## 判斷一條 add op 看起來像不像 Doro 自己回音被誤蒸餾成主人的話
+## 主要防 speech 污染,但 identity/preference 等含明顯自稱 Doro 的也擋
+const _POLLUTION_KEYWORDS: PackedStringArray = [
+	"Doro", "抄我", "偷學", "我的台詞", "我講話", "學我", "偷臭"]
+func _looks_like_doro_selfspeak(op: Dictionary) -> bool:
+	var text: String = String(op.get("text", ""))
+	var typ: String = String(op.get("type", ""))
+	if typ == "speech":
+		for kw in _POLLUTION_KEYWORDS:
+			if text.contains(kw):
+				return true
+		if text.begins_with("哼！") or text.begins_with("哼!"):
+			return true
+		if text.contains("才沒有啦") or text.contains("明明就是你") or text.contains("明明是你"):
+			return true
+		## 撒嬌語尾 (~ + 啦/呀/喔) 大量出現 → Doro 語氣
+		if text.contains("~") and (text.contains("啦") or text.contains("呀") or text.contains("喔")):
+			return true
+	## 非 speech 也擋明顯自稱 Doro / 「我的台詞」的
+	for kw in ["抄我的", "偷學Doro", "我的台詞"]:
+		if text.contains(kw):
+			return true
+	return false
+
+## 記憶條在「關於主人」段下,開頭的「主人/主人的」冗詞剝掉,主詞讓 LLM 從上下文補
+func _strip_owner_prefix(text: String) -> String:
+	var t: String = text.strip_edges()
+	if t.begins_with("主人的"):
+		return t.substr(3).strip_edges()
+	if t.begins_with("主人"):
+		return t.substr(2).strip_edges()
+	return t
 
 ## ---------- 對外:每輪對話後呼叫 ----------
 func on_exchange(history: Array, api_key: String, model: String) -> void:
@@ -155,10 +188,16 @@ speech(主人的口頭禪/常用詞/語尾癖,必須是重複出現多次的)
 - 只記值得長期記住的事實;瑣事(單次行為、打招呼方式)不記
 - 主人在對話中**重複使用**的口頭禪、常用詞、介係詞習慣 → 記 speech
   (例:「主打一個X」「媽的」「就是說」;只出現一次的不算)
+- **STT 回音警戒**:若「主人」的訊息明顯是 Doro 語氣(「哼！」開頭撒嬌詞、
+  自稱 Doro、「~」語尾、「才沒有啦」「明明就是你」「抄我 / 學我 / 我的台詞」),
+  那極可能是 STT 誤把 Doro 自己回音當主人講話。**跳過整條訊息**,
+  不要當 speech 記,也不要基於它推 identity / preference / event
 - 與既有事實矛盾 → update 該編號;不再成立 → delete
 - 既有帳本已涵蓋 → 不要重複 add;沒有新東西就輸出 []
 - event 的 text 開頭帶日期(今天是 {date})
 - text 一律用繁體中文(台灣用字)
+- **text 不要以「主人」開頭**,主詞省略(整段已在「關於主人」下)
+  例:記「喜歡吃布丁」不寫「主人喜歡吃布丁」;「明天要面試」不寫「主人明天要面試」
 - followup:主人提到「明天/下週/等下要 X」「稍後要 Y」等未來事件 → 用 followup
   記下你未來想主動關心的話,due 是那件事發生的日期(相對今天推算)。
   例:主人說「明天要面試」→ {"op":"followup","due":"...","text":"面試怎麼樣了?緊張嗎"}
@@ -246,9 +285,17 @@ func _llm_ops(api_key: String, model: String, system_prompt: String, user_msg: S
 func _apply_ops(ops: Array) -> void:
 	var dt: Dictionary = Time.get_datetime_dict_from_system()
 	var today: String = "%04d-%02d-%02d" % [dt.year, dt.month, dt.day]
-	var applied: Dictionary = {"add": 0, "update": 0, "delete": 0, "followup": 0}
+	var applied: Dictionary = {"add": 0, "update": 0, "delete": 0, "followup": 0, "rejected": 0}
 	for o in ops:
 		if typeof(o) != TYPE_DICTIONARY:
+			continue
+		## 第三層保險:防止蒸餾器把 Doro 自己語氣的話當主人口頭禪記進去
+		if String(o.get("op", "")) == "add" and _looks_like_doro_selfspeak(o):
+			applied["rejected"] += 1
+			DoroLogger.log("distill_rejected", {
+				"reason": "self_speak_pollution",
+				"type": String(o.get("type", "")),
+				"text": String(o.get("text", "")).substr(0, 80)})
 			continue
 		match String(o.get("op", "")):
 			"followup":
