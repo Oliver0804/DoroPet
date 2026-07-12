@@ -13,6 +13,7 @@ const HISTORY_PATH: String = "user://doro_history.json"
 const FACTS_PATH: String = "user://doro_facts.jsonl"
 const ARCHIVE_PATH: String = "user://doro_archive.jsonl"
 const META_PATH: String = "user://doro_memory_meta.json"
+const FOLLOWUPS_PATH: String = "user://doro_followups.jsonl"
 const LEGACY_PATH: String = "user://doro_memory.txt"   ## v1 扁平筆記(遷移用)
 const DISTILL_EVERY: int = 12       ## 每 12 條訊息(6 輪)蒸餾一次
 const MAX_NEW_MSGS: int = 24        ## 單次蒸餾最多帶的新訊息數
@@ -28,7 +29,9 @@ const TYPE_ORDER: PackedStringArray = [
 	"identity", "project", "preference", "relation", "warning", "habit", "speech", "event", "other"]
 
 var _facts: Array = []              ## [{id,type,text,created,updated}]
+var _followups: Array = []          ## [{id,due,text,created,consumed:bool}]
 var _next_id: int = 1
+var _next_followup_id: int = 1
 var _since_distill: int = 0
 var _last_consolidate: String = ""
 var _busy: bool = false
@@ -39,6 +42,7 @@ func _ready() -> void:
 	_http.timeout = 120.0
 	add_child(_http)
 	_load_facts()
+	_load_followups()
 	_load_meta()
 
 ## ---------- 對外:短期歷史(與 v1 相同) ----------
@@ -69,27 +73,60 @@ func memory_section() -> String:
 			+ "頻率要低、用得順口,別每句都塞)\n"
 	return out
 
-## 帳本 → 分類條列文字
+const MEMORY_SECTION_MAX_CHARS: int = 2500   ## 注入 prompt 的記憶段上限,超過就精簡
+
+## 帳本 → 分類條列文字。當總長超過上限,依 TYPE_ORDER 優先順序取,
+## event/project 只保留近期,其餘靠 LLM 用 recall_memory 撈
 func _render_facts() -> String:
 	if _facts.is_empty():
 		return ""
+	## 先分組並依 event 日期新到舊排序
 	var groups: Dictionary = {}
 	for f in _facts:
 		var t: String = String(f.get("type", "other"))
 		if not groups.has(t):
 			groups[t] = []
 		groups[t].append(f)
+	if groups.has("event"):
+		var arr: Array = groups["event"]
+		arr.sort_custom(func(a, b): return String(a.get("created", "")) > String(b.get("created", "")))
+		groups["event"] = arr
+	if groups.has("project"):
+		var arr2: Array = groups["project"]
+		arr2.sort_custom(func(a, b): return String(a.get("updated", "")) > String(b.get("updated", "")))
+		groups["project"] = arr2
+
+	var full: String = _format_groups(groups, {})
+	if full.length() <= MEMORY_SECTION_MAX_CHARS:
+		return full.strip_edges()
+
+	## 超過上限 → 每類設上限,event/project 只保留 5 條
+	var caps: Dictionary = {"event": 5, "project": 5, "other": 3}
+	var trimmed: String = _format_groups(groups, caps)
+	if trimmed.length() <= MEMORY_SECTION_MAX_CHARS:
+		return (trimmed + "\n(其餘記憶靠 recall_memory 撈)").strip_edges()
+	## 仍超過 → 進一步砍到剛好上限,尾巴接省略提示
+	trimmed = trimmed.substr(0, MEMORY_SECTION_MAX_CHARS)
+	return (trimmed + "\n…(記憶太多,已省略;用 recall_memory 找特定關鍵字)").strip_edges()
+
+func _format_groups(groups: Dictionary, per_type_cap: Dictionary) -> String:
 	var out: String = ""
 	for t in TYPE_ORDER:
 		if not groups.has(t):
 			continue
 		out += "【%s】\n" % TYPE_LABELS.get(t, t)
-		for f in groups[t]:
+		var arr: Array = groups[t]
+		var cap: int = int(per_type_cap.get(t, -1))
+		var n: int = arr.size() if cap < 0 else mini(arr.size(), cap)
+		for i in n:
+			var f: Dictionary = arr[i]
 			var date_tag: String = ""
 			if t == "event":
 				date_tag = "(%s)" % String(f.get("created", ""))
 			out += "- %s%s\n" % [String(f.get("text", "")), date_tag]
-	return out.strip_edges()
+		if cap >= 0 and arr.size() > cap:
+			out += "  (…另有 %d 條省略)\n" % (arr.size() - cap)
+	return out
 
 ## ---------- 對外:每輪對話後呼叫 ----------
 func on_exchange(history: Array, api_key: String, model: String) -> void:
@@ -109,7 +146,8 @@ const DISTILL_PROMPT: String = """你是 Doro(桌面寵物)的記憶管理器。
 根據「新對話」對「既有事實帳本」提出修改操作,輸出 JSON array:
 [{"op":"add","type":"<類型>","text":"..."},
  {"op":"update","id":<編號>,"text":"..."},
- {"op":"delete","id":<編號>,"reason":"過時/錯誤"}]
+ {"op":"delete","id":<編號>,"reason":"過時/錯誤"},
+ {"op":"followup","due":"YYYY-MM-DD","text":"到時候你想主動關心/追問的一句話"}]
 類型限定:identity(身份) project(工作專案) preference(偏好要求)
 relation(人際,名字+關係) event(帶日期事件) warning(警示) habit(穩定習慣)
 speech(主人的口頭禪/常用詞/語尾癖,必須是重複出現多次的)
@@ -121,6 +159,10 @@ speech(主人的口頭禪/常用詞/語尾癖,必須是重複出現多次的)
 - 既有帳本已涵蓋 → 不要重複 add;沒有新東西就輸出 []
 - event 的 text 開頭帶日期(今天是 {date})
 - text 一律用繁體中文(台灣用字)
+- followup:主人提到「明天/下週/等下要 X」「稍後要 Y」等未來事件 → 用 followup
+  記下你未來想主動關心的話,due 是那件事發生的日期(相對今天推算)。
+  例:主人說「明天要面試」→ {"op":"followup","due":"...","text":"面試怎麼樣了?緊張嗎"}
+  只在主人明確提到未來時間點時建立;沒有就不要憑空生。
 - 只輸出 JSON array,不要解釋、不要 code fence"""
 
 func _distill(history: Array, api_key: String, model: String) -> void:
@@ -129,7 +171,11 @@ func _distill(history: Array, api_key: String, model: String) -> void:
 	var tail: Array = history.slice(maxi(0, history.size() - n))
 	var convo: String = ""
 	for m in tail:
-		convo += "%s: %s\n" % ["主人" if m.get("role") == "user" else "Doro", String(m.get("content", ""))]
+		var role: String = String(m.get("role", ""))
+		## 系統注入的 proactive 提示不是主人講的話,跳過(Doro 對 proactive 的回覆仍保留)
+		if role == "user" and String(m.get("meta", "")) == "proactive":
+			continue
+		convo += "%s: %s\n" % ["主人" if role == "user" else "Doro", String(m.get("content", ""))]
 	var user_msg: String = "【既有事實帳本】\n%s\n\n【新對話】\n%s" % [_ledger_text(), convo]
 	var dt: Dictionary = Time.get_datetime_dict_from_system()
 	var today: String = "%04d-%02d-%02d" % [dt.year, dt.month, dt.day]
@@ -200,11 +246,22 @@ func _llm_ops(api_key: String, model: String, system_prompt: String, user_msg: S
 func _apply_ops(ops: Array) -> void:
 	var dt: Dictionary = Time.get_datetime_dict_from_system()
 	var today: String = "%04d-%02d-%02d" % [dt.year, dt.month, dt.day]
-	var applied: Dictionary = {"add": 0, "update": 0, "delete": 0}
+	var applied: Dictionary = {"add": 0, "update": 0, "delete": 0, "followup": 0}
 	for o in ops:
 		if typeof(o) != TYPE_DICTIONARY:
 			continue
 		match String(o.get("op", "")):
+			"followup":
+				var due: String = String(o.get("due", "")).strip_edges()
+				var ftext: String = String(o.get("text", "")).strip_edges()
+				if due == "" or ftext == "":
+					continue
+				_followups.append({
+					"id": _next_followup_id, "due": due, "text": ftext,
+					"created": today, "consumed": false,
+				})
+				_next_followup_id += 1
+				applied["followup"] += 1
 			"add":
 				var text: String = String(o.get("text", "")).strip_edges()
 				if text == "":
@@ -322,6 +379,9 @@ func recall(keyword: String) -> String:
 				continue
 			var t: String = String((d as Dictionary).get("type", ""))
 			if t == "chat_request":
+				## 系統自動觸發的 proactive 搭話提示不算主人講的話
+				if String((d as Dictionary).get("meta", "")) == "proactive":
+					continue
 				hits.append("[%s 主人說] %s" % [day, String(d.get("text", "")).substr(0, 80)])
 			elif t == "chat_response":
 				hits.append("[%s Doro說] %s" % [day, String(d.get("text", "")).substr(0, 80)])
@@ -345,8 +405,60 @@ func _save_all() -> void:
 	for f in _facts:
 		out += JSON.stringify(f) + "\n"
 	_save_text(FACTS_PATH, out)
+	_save_followups()
 	_save_text(META_PATH, JSON.stringify({
-		"next_id": _next_id, "last_consolidate": _last_consolidate}))
+		"next_id": _next_id, "next_followup_id": _next_followup_id,
+		"last_consolidate": _last_consolidate}))
+
+## ---------- Followups(前瞻記憶) ----------
+func _load_followups() -> void:
+	_followups.clear()
+	for line in _load_text(FOLLOWUPS_PATH).split("\n"):
+		if line.strip_edges() == "":
+			continue
+		var d: Variant = JSON.parse_string(line)
+		if typeof(d) == TYPE_DICTIONARY:
+			_followups.append(d)
+			_next_followup_id = maxi(_next_followup_id, int((d as Dictionary).get("id", 0)) + 1)
+
+func _save_followups() -> void:
+	var out: String = ""
+	for f in _followups:
+		out += JSON.stringify(f) + "\n"
+	_save_text(FOLLOWUPS_PATH, out)
+
+## 撿一條到期(due <= today)且未消化的 followup;找到就標記 consumed 存檔
+func pop_due_followup() -> Dictionary:
+	var dt: Dictionary = Time.get_datetime_dict_from_system()
+	var today: String = "%04d-%02d-%02d" % [dt.year, dt.month, dt.day]
+	for f in _followups:
+		if bool(f.get("consumed", false)):
+			continue
+		var due: String = String(f.get("due", ""))
+		if due != "" and due <= today:
+			f["consumed"] = true
+			f["consumed_on"] = today
+			_save_followups()
+			DoroLogger.log("followup_pop", {"id": f.get("id"), "due": due,
+				"text": String(f.get("text", "")).substr(0, 60)})
+			return f
+	return {}
+
+## 給 debug view 讀所有 followups(唯讀複本)
+func get_all_followups() -> Array:
+	return _followups.duplicate()
+
+## 未消化且已到期的數量(給 UI/log 統計用)
+func due_followup_count() -> int:
+	var dt: Dictionary = Time.get_datetime_dict_from_system()
+	var today: String = "%04d-%02d-%02d" % [dt.year, dt.month, dt.day]
+	var c: int = 0
+	for f in _followups:
+		if bool(f.get("consumed", false)):
+			continue
+		if String(f.get("due", "")) <= today:
+			c += 1
+	return c
 
 func _load_meta() -> void:
 	var raw: String = _load_text(META_PATH)
@@ -355,6 +467,8 @@ func _load_meta() -> void:
 	var d: Variant = JSON.parse_string(raw)
 	if typeof(d) == TYPE_DICTIONARY:
 		_next_id = maxi(_next_id, int((d as Dictionary).get("next_id", 1)))
+		_next_followup_id = maxi(_next_followup_id,
+			int((d as Dictionary).get("next_followup_id", 1)))
 		_last_consolidate = String((d as Dictionary).get("last_consolidate", ""))
 
 func _append_jsonl(path: String, obj: Dictionary) -> void:

@@ -96,7 +96,9 @@ const VoiceClient := preload("res://scripts/voice_client.gd")
 const LogsViewer := preload("res://scripts/logs_viewer.gd")
 const Updater := preload("res://scripts/updater.gd")
 const DoroLogger := preload("res://scripts/logger.gd")
+const ContextDebug := preload("res://scripts/context_debug.gd")
 var _logs_viewer: Window
+var _debug_window: Window
 var _updater: Node
 var _update_url: String = ""
 var _auto_check_updates: bool = true
@@ -107,6 +109,17 @@ var _proactive_chat_max_sec: float = 1800.0     ## 上限 30 分鐘
 var _proactive_prompt: String = ""              ## 自訂搭話指令(留空用預設)
 var _proactive_with_screenshot: bool = false    ## 主動搭話時自動拍螢幕一起送
 var _proactive_timer: Timer
+var _last_proactive_ts: int = 0                 ## 上次主動搭話的 Unix 秒(冷卻)
+var _proactive_today_count: int = 0
+var _proactive_today_date: String = ""
+var _greeted_this_session: bool = false
+## 情境化主動性:滑鼠活動追蹤
+var _activity_time: float = 0.0                 ## 「連續有活動」的累積秒(idle 過久 reset)
+var _last_activity_ts: int = 0
+const IDLE_RESET_ACTIVITY_SEC: float = 600.0    ## 沒動超過 10 min → 重置活動累積
+const PROACTIVE_COOLDOWN_SEC: int = 900         ## 15 min 內不重複主動搭話
+const PROACTIVE_DAILY_LIMIT: int = 8            ## 一天上限 8 次(避免騷擾)
+const STARTUP_GREETING_MIN_HOURS: float = 6.0   ## 距上次講話 > 6 小時才觸發開機問候
 const DEFAULT_PROACTIVE_PROMPT: String = "(系統提示:主人靜默了一段時間,你主動找他/她聊個有趣或關心的話題,維持 30 字內。話題可以是天氣、時間、最近有沒有累、想吃什麼等貼心關懷,或分享你今天的『心情』。)"
 
 ## Doro idle 語音(播預先生成好的 wav,不走 LLM/TTS)
@@ -136,6 +149,8 @@ const INPUT_IDLE_SEC: float = 5.0
 ## user 不講話超過 _continuous_timeout_sec 才真關
 var _continuous_voice: bool = true
 var _continuous_timeout_sec: float = 15.0
+## 常駐聽:啟動後隨時可以講話,不用按熱鍵。VAD/串流 ASR 自動斷句送 LLM
+var _always_listening: bool = false
 var _settings: Window                      ## SettingsDialog 實例
 var _last_input_voice: bool = false        ## 最近一次輸入是否來自語音（決定要不要朗讀回覆）
 var _pending_bubble_text: String = ""      ## TTS 生成中先壓著的回覆文字，開播才顯示
@@ -181,6 +196,39 @@ func _ready() -> void:
 	_setup_tray()
 	_setup_proactive_chat()
 	_setup_idle_voice()
+	## 延一秒等 voice_client 初始化完成再啟動常駐聽
+	if _always_listening:
+		await get_tree().create_timer(1.0).timeout
+		_apply_always_listening()
+
+## ---------- 常駐聽(隨時 STT) ----------
+func _apply_always_listening() -> void:
+	if _voice == null:
+		return
+	if _always_listening:
+		if not _voice.call("has_stt"):
+			_show_bubble("(沒設 STT,無法常駐聽~)", 3.0)
+			_always_listening = false
+			_menu.set_item_checked(_menu.get_item_index(43), false)
+			return
+		if not _voice.call("is_recording"):
+			_last_input_voice = true
+			_voice.call("start_recording")
+			DoroLogger.log("always_listen_on", {})
+	else:
+		if _voice.call("is_recording") and (_input_window == null or not _input_window.visible):
+			_voice.call("abort_recording")
+			DoroLogger.log("always_listen_off", {})
+
+func _toggle_always_listening() -> void:
+	_always_listening = not _always_listening
+	_menu.set_item_checked(_menu.get_item_index(43), _always_listening)
+	_save_config()
+	_apply_always_listening()
+	if _always_listening:
+		_show_bubble("🎤 Doro 隨時聽你說話~", 3.0)
+	else:
+		_show_bubble("🔕 Doro 不再常駐聽", 2.0)
 
 ## ---------- 主動搭話 ----------
 func _setup_proactive_chat() -> void:
@@ -190,6 +238,29 @@ func _setup_proactive_chat() -> void:
 	add_child(_proactive_timer)
 	if _proactive_chat_enabled:
 		_schedule_proactive()
+	_maybe_startup_greeting()          ## fire-and-forget
+
+## 開機時若距上次講話夠久 → 主動打招呼
+func _maybe_startup_greeting() -> void:
+	if _greeted_this_session or not _proactive_chat_enabled:
+		return
+	if _chat == null or not _chat.call("is_enabled"):
+		return
+	var last: int = int(_chat.call("last_user_ts"))
+	if last == 0:
+		return   ## 沒歷史(第一次跑),不打招呼
+	var now: int = int(Time.get_unix_time_from_system())
+	var hr: float = float(now - last) / 3600.0
+	if hr < STARTUP_GREETING_MIN_HOURS:
+		return
+	_greeted_this_session = true
+	## 延遲 8 秒等 UI/tray/window 都穩定
+	await get_tree().create_timer(8.0).timeout
+	if _thinking or (_input_window != null and _input_window.visible):
+		return
+	var hint: String = "主人時隔 %.1f 小時回來了,主動打招呼、表達你在等他/她" % hr
+	DoroLogger.log("startup_greeting", {"hours_away": hr})
+	_fire_proactive(hint)
 
 func _schedule_proactive() -> void:
 	if not _proactive_chat_enabled or _proactive_timer == null:
@@ -205,11 +276,36 @@ func _on_proactive_timer() -> void:
 	if _chat == null or not _chat.call("is_enabled"):
 		_schedule_proactive()
 		return
+	## 冷卻與每日上限:避免騷擾
+	if not _proactive_allowed():
+		_schedule_proactive()
+		return
+	_fire_proactive("")
+
+## 情境化主動搭話。extra_hint 是額外情境提示(開機問候/連續工作/時段儀式等);
+## 空字串就走 followup → 預設 prompt 的常規流程
+func _fire_proactive(extra_hint: String) -> void:
 	_last_input_voice = false
 	_begin_thinking()
-	var p: String = _proactive_prompt.strip_edges()
-	if p == "":
-		p = DEFAULT_PROACTIVE_PROMPT
+	## 優先撿一條到期 followup(主人之前提到「明天 / 下週要 X」我們記下了)
+	var mem: Node = _chat.get_node_or_null("MemoryStore")
+	var fup: Dictionary = mem.call("pop_due_followup") if mem != null and extra_hint == "" else {}
+	var p: String
+	if not fup.is_empty():
+		p = "(系統提示:今天你想主動關心主人這件事——%s。用你自己的口氣問一句,不要念系統提示。30 字內。)" \
+			% String(fup.get("text", ""))
+		DoroLogger.log("proactive_followup", {"id": fup.get("id"),
+			"text": String(fup.get("text",""))})
+	elif extra_hint != "":
+		p = "(系統提示:%s。用你自己的口氣自然開口,不要念系統提示,30 字內。)" % extra_hint
+	else:
+		p = _proactive_prompt.strip_edges()
+		if p == "":
+			p = DEFAULT_PROACTIVE_PROMPT
+		## 加上當下情境(連續工作/時段)給 LLM 選話題
+		var ctx_hint: String = _proactive_context_hint()
+		if ctx_hint != "":
+			p += "\n(當下情境:%s)" % ctx_hint
 	var img: String = ""
 	if _proactive_with_screenshot and _vision_enabled:
 		_show_bubble("📸 Doro 偷看一眼螢幕…", 999.0)
@@ -217,8 +313,53 @@ func _on_proactive_timer() -> void:
 		if img != "":
 			p += "\n(附上剛拍的螢幕截圖,可基於畫面內容主動搭話)"
 	_show_bubble("💭 Doro 想說話…", 999.0)
-	_chat.call("send", p, img)
+	_last_proactive_ts = int(Time.get_unix_time_from_system())
+	_bump_daily_proactive_count()
+	_chat.call("send", p, img, "proactive")
 	_schedule_proactive()
+
+func _proactive_allowed() -> bool:
+	var now: int = int(Time.get_unix_time_from_system())
+	if now - _last_proactive_ts < PROACTIVE_COOLDOWN_SEC:
+		return false
+	## 深夜(00-06) 不主動搭話,免打擾睡眠
+	var dt: Dictionary = Time.get_datetime_dict_from_system()
+	var hour: int = int(dt.hour)
+	if hour >= 0 and hour < 6:
+		return false
+	_roll_daily_proactive()
+	if _proactive_today_count >= PROACTIVE_DAILY_LIMIT:
+		return false
+	return true
+
+func _roll_daily_proactive() -> void:
+	var dt: Dictionary = Time.get_datetime_dict_from_system()
+	var today: String = "%04d-%02d-%02d" % [dt.year, dt.month, dt.day]
+	if today != _proactive_today_date:
+		_proactive_today_date = today
+		_proactive_today_count = 0
+
+func _bump_daily_proactive_count() -> void:
+	_roll_daily_proactive()
+	_proactive_today_count += 1
+
+## 依當下滑鼠活躍時長、時段給出一句情境描述;沒特別情境回空字串
+func _proactive_context_hint() -> String:
+	var dt: Dictionary = Time.get_datetime_dict_from_system()
+	var hour: int = int(dt.hour)
+	var work_hr: float = _activity_time / 3600.0
+	## 連續工作偵測(當下還在動、累積很久)
+	if work_hr >= 1.5 and _mouse_idle_time < 60.0:
+		return "主人已經連續操作快 %.1f 小時了,可以關心他休息一下、伸懶腰、喝水" % work_hr
+	if hour == 12 or hour == 13:
+		return "現在是午餐時段,可以問吃飯了沒"
+	if hour == 18 or hour == 19:
+		return "現在是傍晚,可以問今天過得如何、晚餐吃什麼"
+	if hour >= 22 and hour <= 23:
+		return "很晚了,可以溫柔勸主人早點睡"
+	if hour >= 8 and hour < 10:
+		return "早上,可以問今天有沒有精神、想做什麼"
+	return ""
 
 ## ---------- Doro 隨機念話(pre-generated wav) ----------
 func _setup_idle_voice() -> void:
@@ -290,6 +431,7 @@ func _setup_tray() -> void:
 	_tray_menu.add_separator()
 	_tray_menu.add_item("檢查更新 / 下載新版", 202)
 	_tray_menu.add_item("設定…", 203)
+	_tray_menu.add_item("🔍 Debug 上下文", 204)
 	_tray_menu.add_separator()
 	_tray_menu.add_item("結束", 299)
 	_tray_menu.id_pressed.connect(_on_tray_menu)
@@ -326,6 +468,9 @@ func _on_tray_menu(id: int) -> void:
 		203:
 			_show_window_if_hidden()
 			_open_settings()
+		204:
+			_show_window_if_hidden()
+			_open_context_debug()
 		299:
 			_cleanup_tray()
 			get_tree().quit()
@@ -426,11 +571,30 @@ func _auto_emo_fire() -> void:
 	if _thinking:
 		_schedule_next_auto_emo()
 		return
-	var emo: int = AUTO_EMO_CHOICES[randi() % AUTO_EMO_CHOICES.size()]
+	var emo: int = _weighted_pick_emotion()
 	_setting_auto_emo = true
 	_set_emotion(emo)
 	_setting_auto_emo = false
 	_auto_emo_reset_timer.start(AUTO_EMO_HOLD_SEC)
+
+## 依心情加權抽表情:低落時多失神/無言、開心時多開心/吐舌
+func _weighted_pick_emotion() -> int:
+	var mood: Node = _chat.call("get_mood") if _chat != null else null
+	if mood == null:
+		return AUTO_EMO_CHOICES[randi() % AUTO_EMO_CHOICES.size()]
+	var weights: Array = mood.call("emotion_weights", AUTO_EMO_CHOICES)
+	var total: float = 0.0
+	for w in weights:
+		total += float(w)
+	if total <= 0.0:
+		return AUTO_EMO_CHOICES[randi() % AUTO_EMO_CHOICES.size()]
+	var r: float = randf() * total
+	var acc: float = 0.0
+	for i in weights.size():
+		acc += float(weights[i])
+		if r <= acc:
+			return AUTO_EMO_CHOICES[i]
+	return AUTO_EMO_CHOICES[weights.size() - 1]
 
 func _auto_emo_reset() -> void:
 	if not _thinking:
@@ -529,6 +693,9 @@ func _build_menu() -> void:
 	_menu.add_item("重設大小", 22)
 	_menu.add_separator()
 	_menu.add_item("設定…", 40)
+	_menu.add_check_item("🎤 隨時聽(常駐 STT)", 43)
+	_menu.set_item_checked(_menu.get_item_index(43), _always_listening)
+	_menu.add_item("🔍 Debug 上下文", 42)
 	_menu.add_item("檢查更新 (v%s)" % Updater.current_version(), 41)
 	_menu.add_separator()
 	_menu.add_item("隱藏到系統匣", 50)
@@ -560,6 +727,10 @@ func _on_menu(id: int) -> void:
 				_show_bubble("(對話清空了 ~)", 2.5)
 		40:
 			_open_settings()
+		42:
+			_open_context_debug()
+		43:
+			_toggle_always_listening()
 		41:
 			if _update_url != "":
 				## 已知有新版 → 直接一鍵更新並重啟
@@ -673,8 +844,13 @@ func _process(dt: float) -> void:
 		if mouse_screen.distance_to(_last_mouse_pos) > 2.0:
 			_last_mouse_pos = mouse_screen
 			_mouse_idle_time = 0.0
+			_activity_time += dt
+			_last_activity_ts = int(Time.get_unix_time_from_system())
 		else:
 			_mouse_idle_time += dt
+			## 連續 idle 太久 → 主人離座 / 睡覺,重置活動累積
+			if _mouse_idle_time > IDLE_RESET_ACTIVITY_SEC:
+				_activity_time = 0.0
 		if _mouse_idle_time < IDLE_TRIGGER_SEC:
 			var win_pos: Vector2 = Vector2(DisplayServer.window_get_position())
 			var win_size: Vector2 = Vector2(DisplayServer.window_get_size())
@@ -849,6 +1025,11 @@ func _input(event: InputEvent) -> void:
 			else:
 				if _dragging and _drag_offset.length() < 4.0:
 					_cycle_expression()
+					## 點擊 Doro = 摸頭,心情稍微好轉
+					if _chat != null:
+						var mood: Node = _chat.call("get_mood")
+						if mood != null:
+							mood.call("on_positive_stroke")
 				_dragging = false
 		elif event.button_index == MOUSE_BUTTON_RIGHT and event.pressed:
 			_show_menu_at_mouse()
@@ -1009,7 +1190,8 @@ func _open_input() -> void:
 func _close_input() -> void:
 	_input_box.release_focus()
 	_input_window.hide()
-	if _voice != null and _voice.call("is_recording"):
+	## 常駐聽模式:input 關掉後錄音仍留著,不要 abort
+	if _voice != null and _voice.call("is_recording") and not _always_listening:
 		_voice.call("abort_recording")
 
 func _make_floating_window(default_size: Vector2i) -> Window:
@@ -1039,10 +1221,13 @@ func _reposition_input() -> void:
 	_input_window.position = Vector2i(x, y)
 
 ## 訊息含這些關鍵字 → 自動截圖附帶
+## 只留明確詞;含糊的「這個/看看/幫我看」交給 LLM 的 take_screenshot tool 自己判斷
 const SCREEN_KEYWORDS: PackedStringArray = [
-	"螢幕", "熒幕", "荧幕", "屏幕", "畫面", "画面", "桌面", "你看", "看看",
-	"看一下", "幫我看", "看這", "這個", "這邊", "我這", "截圖",
-	"screen", "see this", "look at", "screenshot",
+	"螢幕", "熒幕", "荧幕", "屏幕",
+	"畫面", "画面",
+	"桌面",
+	"截圖", "截個圖", "截个图",
+	"screen", "screenshot",
 ]
 
 func _wants_screenshot(text: String) -> bool:
@@ -1306,6 +1491,10 @@ func _on_chat_tool_started(name: String) -> void:
 			_show_bubble("☁️ Doro 查天氣中…", 999.0)
 		"get_time":
 			_show_bubble("⏰ Doro 看一下時間…", 999.0)
+		"web_search":
+			_show_bubble("🌐 Doro 上網搜尋…", 999.0)
+		"recall_memory":
+			_show_bubble("🧠 Doro 翻記憶…", 999.0)
 		_:
 			_show_bubble("⚙️ Doro 呼叫工具中…", 999.0)
 
@@ -1374,6 +1563,8 @@ func _on_recording_stopped() -> void:
 func _on_voice_transcribed(text: String) -> void:
 	## STT 完成 → 檢查截圖關鍵字(跟打字路徑一致)再送
 	_last_input_voice = true
+	if not _thinking:
+		_begin_thinking()      ## 眼睛動起來:串流模式 / 常駐聽下也要
 	_show_bubble("「%s」" % text, 2.0)
 	await get_tree().create_timer(0.3).timeout
 	var img: String = ""
@@ -1394,15 +1585,18 @@ func _on_voice_transcribed(text: String) -> void:
 
 func _on_voice_error(reason: String) -> void:
 	_end_thinking()
-	## 連續對話模式的空白錄音(環境音誤觸 VAD)不當錯誤:安靜地繼續聽
-	if reason.contains("沒辨識到內容") and _continuous_voice and _last_input_voice \
-			and _input_window != null and _input_window.visible:
-		if _voice != null and _voice.call("has_stt") and not _voice.call("is_recording"):
-			_vad_has_spoken = false
-			_vad_silence_t = 0.0
-			_voice.call("start_recording")
-			_start_continuous_timeout()
-		return
+	## 常駐聽 / 連續對話下的空白錄音(環境音誤觸 VAD)不當錯誤:安靜地繼續聽
+	if reason.contains("沒辨識到內容"):
+		var input_open: bool = _input_window != null and _input_window.visible
+		var should_relisten: bool = _always_listening or (_continuous_voice and _last_input_voice and input_open)
+		if should_relisten and _voice != null and _voice.call("has_stt"):
+			if not _voice.call("is_recording"):
+				_vad_has_spoken = false
+				_vad_silence_t = 0.0
+				_voice.call("start_recording")
+			if input_open:
+				_start_continuous_timeout()
+			return
 	_show_bubble("(嗚… %s)" % reason, 3.0)
 
 func _show_bubble(text: String, seconds: float) -> void:
@@ -1503,6 +1697,13 @@ func _open_logs() -> void:
 		_logs_viewer = LogsViewer.new()
 		add_child(_logs_viewer)
 	_logs_viewer.call("open")
+
+func _open_context_debug() -> void:
+	if _debug_window == null:
+		_debug_window = ContextDebug.new()
+		_debug_window.call("set_chat", _chat)
+		add_child(_debug_window)
+	_debug_window.call("open_debug")
 
 func _on_settings_changed(data: Dictionary) -> void:
 	## 即時套用 + 寫 config
@@ -1616,6 +1817,7 @@ func _load_config() -> void:
 	_vad_silence_sec = float(cfg.get_value("pet", "vad_silence_sec", _vad_silence_sec))
 	_continuous_voice = bool(cfg.get_value("pet", "continuous_voice", _continuous_voice))
 	_continuous_timeout_sec = float(cfg.get_value("pet", "continuous_timeout_sec", _continuous_timeout_sec))
+	_always_listening = bool(cfg.get_value("pet", "always_listening", _always_listening))
 	_msaa = int(cfg.get_value("pet", "msaa", _msaa))
 	_auto_check_updates = bool(cfg.get_value("pet", "auto_check_updates", _auto_check_updates))
 	_vision_enabled = bool(cfg.get_value("pet", "vision_enabled", _vision_enabled))
@@ -1647,6 +1849,7 @@ func _save_config() -> void:
 	cfg.set_value("pet", "vad_silence_sec", _vad_silence_sec)
 	cfg.set_value("pet", "continuous_voice", _continuous_voice)
 	cfg.set_value("pet", "continuous_timeout_sec", _continuous_timeout_sec)
+	cfg.set_value("pet", "always_listening", _always_listening)
 	cfg.set_value("pet", "msaa", _msaa)
 	cfg.set_value("pet", "auto_check_updates", _auto_check_updates)
 	cfg.set_value("pet", "vision_enabled", _vision_enabled)

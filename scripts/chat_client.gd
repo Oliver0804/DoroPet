@@ -93,12 +93,14 @@ const SYSTEM_RULES: String = """
 若仍看不懂,可用 emotion=4(疑問)反問澄清。
 
 【工具呼叫】
-你有 get_time、get_weather、take_screenshot、recall_memory 四個工具。
-主人問起更早以前的事、或你記憶裡沒有的舊話題,用 recall_memory 翻舊帳再回答。
-當使用者問時間、天氣、或要你看螢幕內容,**主動呼叫對應工具**取得最新資料再回答,
-不要瞎掰或猜測。
-**嚴禁**只回「我看看」「稍等我這就看」這種話而不呼叫工具——
-說要看螢幕就必須在同一回合呼叫 take_screenshot,說要查就必須馬上查。
+你有 5 個工具:get_time、get_weather、take_screenshot、recall_memory、web_search。
+- 問時間 → get_time;問天氣 → get_weather;要你看畫面 → take_screenshot
+- 主人問起更早以前的事、或你記憶裡沒有的舊話題 → recall_memory 翻舊帳
+- 問**新聞、當前事件、你不知道的人事物、統計數據、產品資訊、比賽結果**等
+  需要即時網路資料的問題 → web_search 查了再答,不要憑印象亂講
+**嚴禁**只回「我看看」「稍等我這就看」「Doro 不太清楚耶」這種話而不呼叫工具——
+說要看螢幕就必須在同一回合呼叫 take_screenshot,說要查就必須馬上查,
+不知道就先 web_search 再說「不確定」。
 
 【絕對禁止】純文字、解釋、code fence、多個 JSON、emoji 圖示。"""
 const MAX_HISTORY: int = 24                ## 對話 context 上限（user+assistant 訊息對）
@@ -106,6 +108,7 @@ const TIMEOUT_SEC: float = 30.0
 
 const DoroLogger := preload("res://scripts/logger.gd")
 const MemoryStore := preload("res://scripts/memory_store.gd")
+const MoodState := preload("res://scripts/mood_state.gd")
 const TOOLS_SCHEMA: Array = [
 	{
 		"type": "function",
@@ -151,12 +154,26 @@ const TOOLS_SCHEMA: Array = [
 			"parameters": {"type": "object", "properties": {}, "required": []},
 		},
 	},
+	{
+		"type": "function",
+		"function": {
+			"name": "web_search",
+			"description": "上網搜尋最新資訊。主人問到你不知道的新聞、當前事件、產品規格、比賽比分、匯率、演唱會/上映資訊、統計數據等需要即時網路資料時呼叫。回傳前 3 筆搜尋結果標題+摘要。",
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"query": {"type": "string", "description": "搜尋關鍵字,簡潔短句或詞組(3-8 字最佳),用主人問句裡最關鍵的名詞"}
+				},
+				"required": ["query"],
+			},
+		},
+	},
 ]
 const MAX_TOOL_ROUNDS: int = 3              ## 防 LLM 無限呼叫
 
 var _http: HTTPRequest
 var _tool_http: HTTPRequest                ## 給 weather 等 tool 用
-var _history: Array = []                   ## [{role,content}, ...]
+var _history: Array = []                   ## [{role,content,ts,meta?}, ...] ts=Unix秒,meta="proactive"標記系統注入
 var _running_messages: Array = []          ## 當前 in-flight 的 messages(可含 tool_calls)
 var _api_key: String = ""
 var _model: String = DEFAULT_MODEL
@@ -167,6 +184,18 @@ var _request_started_ms: int = 0
 var _round: int = 0
 var _pending_image_b64: String = ""              ## LLM call take_screenshot 後待塞的圖
 var _mem: Node                                   ## MemoryStore(歷史落盤 + 主人筆記)
+var _mood: Node                                  ## MoodState(愉悅/活力兩軸,持久化)
+## in-flight 期間主人又講話的排隊(避免「等 Doro 回覆中」把後續話吃掉)
+var _pending_texts: PackedStringArray = []
+var _pending_metas: PackedStringArray = []
+## Debug 檢視用:每次 send / reply 更新的快照(不影響對話邏輯)
+var _dbg_system_prompt: String = ""
+var _dbg_messages: Array = []
+var _dbg_reply_raw: String = ""
+var _dbg_reply_text: String = ""
+var _dbg_reply_emotion: int = 0
+var _dbg_latency_ms: int = 0
+var _dbg_last_meta: String = ""
 
 ## ---------- runtime 設定 ----------
 func set_api_key(k: String) -> void:
@@ -215,6 +244,9 @@ func _ready() -> void:
 	_mem = MemoryStore.new()
 	_mem.name = "MemoryStore"
 	add_child(_mem)
+	_mood = MoodState.new()
+	_mood.name = "MoodState"
+	add_child(_mood)
 	## 上次的對話接著聊(短期記憶落盤)
 	_history = _mem.call("load_history")
 
@@ -233,43 +265,94 @@ func is_busy() -> bool:
 func abort() -> void:
 	if not _in_flight:
 		return
-	_in_flight = false
+	## 使用者主動 ESC:排隊也一起放棄(不想再繼續了)
+	_pending_texts.clear()
+	_pending_metas.clear()
+	_in_flight = false      ## 不走 _clear_flight,免得排 flush
 	_http.cancel_request()
 	if not _history.is_empty() and String((_history.back() as Dictionary).get("role", "")) == "user":
 		_history.pop_back()
+	if _mood != null:
+		_mood.call("on_user_abort")
 	DoroLogger.log("chat_abort", {})
 
 func reset_history() -> void:
 	_history.clear()
+	_pending_texts.clear()
+	_pending_metas.clear()
 	if _mem != null:
 		_mem.call("clear_history")   ## 只清短期;長期筆記留著
 
 func get_memory() -> String:
 	return _mem.call("get_memory") if _mem != null else ""
 
-func send(user_text: String, image_b64: String = "") -> void:
+func get_mood() -> Node:
+	return _mood
+
+## 最近一次「主人真的講話」的 Unix 秒(不含 proactive);0 = 沒紀錄
+func last_user_ts() -> int:
+	return _last_user_ts()
+
+## Debug 視窗用:回傳最近一次 LLM 呼叫的完整快照
+func get_debug_snapshot() -> Dictionary:
+	return {
+		"system_prompt": _dbg_system_prompt,
+		"messages": _dbg_messages,
+		"last_reply_raw": _dbg_reply_raw,
+		"last_reply_text": _dbg_reply_text,
+		"last_reply_emotion": _dbg_reply_emotion,
+		"last_latency_ms": _dbg_latency_ms,
+		"last_meta": _dbg_last_meta,
+		"model": _model,
+		"history_size": _history.size(),
+	}
+
+func send(user_text: String, image_b64: String = "", meta: String = "") -> void:
 	if _in_flight:
-		error_occurred.emit("等 Doro 回覆中…")
+		## 排隊,回覆完自動送(帶圖的不進 queue,避免圖被延遲失效)
+		if image_b64 == "":
+			_pending_texts.append(user_text)
+			_pending_metas.append(meta)
+			DoroLogger.log("chat_queued", {"text": user_text.substr(0, 60),
+				"queue_size": _pending_texts.size(), "meta": meta})
+		else:
+			error_occurred.emit("Doro 忙著回上一句,附圖的訊息請稍後再送")
 		return
 	if _api_key == "":
 		error_occurred.emit("沒設 OPENROUTER_API_KEY")
 		return
 
+	var now_ts: int = int(Time.get_unix_time_from_system())
+	var last_user_ts: int = _last_user_ts()
+
 	## history 內存純文字（避免長期堆積大量 base64 圖片）
-	_history.append({"role": "user", "content": user_text})
+	## ts 讓 Doro 感知時間流逝;meta="proactive" 標記系統自動觸發的搭話提示
+	var entry: Dictionary = {"role": "user", "content": user_text, "ts": now_ts}
+	if meta != "":
+		entry["meta"] = meta
+	_history.append(entry)
 	if _history.size() > MAX_HISTORY * 2:
 		_history = _history.slice(_history.size() - MAX_HISTORY * 2)
 
-	## 最終 system prompt = user 人設 + 主人筆記(長期記憶) + 系統規則(規則永遠 append,user 改不到)
-	var full_system: String = _persona.strip_edges() + String(_mem.call("memory_section")) + "\n" + SYSTEM_RULES
+	## 最終 system prompt = 人設 + 時間感 + 主人筆記(長期記憶) + 系統規則
+	## 只有真的是主人講的話才更新「被陪伴」計數;proactive 系統提示不算
+	if meta != "proactive" and _mood != null:
+		_mood.call("on_user_message")
+	var time_ctx: String = _build_time_context(now_ts, last_user_ts)
+	var mood_ctx: String = String(_mood.call("prompt_line")) if _mood != null else ""
+	var style_ctx: String = _build_style_context(3)
+	var full_system: String = _persona.strip_edges() + time_ctx + mood_ctx + style_ctx \
+		+ String(_mem.call("memory_section")) + "\n" + SYSTEM_RULES
 	var messages: Array = [{"role": "system", "content": full_system}]
+	## 送 API 前 strip 掉自加的 ts/meta(OpenAI 兼容 API 只吃 role/content/tool_*)
 	if image_b64 == "":
-		messages.append_array(_history)
+		for m in _history:
+			messages.append(_strip_meta(m))
 	else:
 		## 把最後一條 user message 改成 multimodal content（text + image）
 		var n: int = _history.size()
 		for i in n - 1:
-			messages.append(_history[i])
+			messages.append(_strip_meta(_history[i]))
 		messages.append({
 			"role": "user",
 			"content": [
@@ -282,13 +365,125 @@ func send(user_text: String, image_b64: String = "") -> void:
 	_round = 0
 	_in_flight = true
 	_request_started_ms = Time.get_ticks_msec()
+	## Debug snapshot
+	_dbg_system_prompt = full_system
+	_dbg_messages = messages.duplicate(true)
+	_dbg_last_meta = meta
 	DoroLogger.log("chat_request", {
 		"text": user_text,
 		"model": _model,
 		"has_image": image_b64 != "",
 		"history_size": _history.size(),
+		"meta": meta,
+	})
+	## 完整 prompt 分開 log(可能很大,獨立事件方便 debug 篩選)
+	DoroLogger.log("chat_prompt", {
+		"system_prompt": full_system,
+		"messages_count": messages.size(),
 	})
 	_send_round()
+
+## 把 _in_flight 收乾淨並排程 flush 排隊訊息(defer 一次,讓當前 emit 先跑完)
+func _clear_flight() -> void:
+	_in_flight = false
+	call_deferred("_flush_pending")
+
+## 收工後檢查有沒有排隊訊息;有就合併成一條再送
+## 合併理由:LLM tokens 貴,多條連續碎片語意上就是一輪思考
+func _flush_pending() -> void:
+	if _pending_texts.is_empty() or _in_flight:
+		return
+	var combined: String
+	if _pending_texts.size() == 1:
+		combined = _pending_texts[0]
+	else:
+		combined = "(主人剛剛接連說了幾句)\n" + "\n".join(_pending_texts)
+	var meta: String = _pending_metas[0] if _pending_metas.size() > 0 else ""
+	## 若排隊有真人講的話,整批視為 user 訊息(meta="")而非 proactive
+	for m in _pending_metas:
+		if String(m) != "proactive":
+			meta = ""
+			break
+	_pending_texts.clear()
+	_pending_metas.clear()
+	DoroLogger.log("chat_flush_pending", {"combined_text": combined.substr(0, 100)})
+	call_deferred("send", combined, "", meta)
+
+## API 只吃 role/content/tool_*;剝掉我們自加的 ts/meta
+func _strip_meta(m: Dictionary) -> Dictionary:
+	var out: Dictionary = {}
+	for k in ["role", "content", "tool_calls", "tool_call_id", "name"]:
+		if m.has(k):
+			out[k] = m[k]
+	return out
+
+## 最近一次「真的是主人講的話」的 ts;跳過 proactive 系統提示
+func _last_user_ts() -> int:
+	for i in range(_history.size() - 1, -1, -1):
+		var m: Dictionary = _history[i]
+		if String(m.get("role", "")) != "user":
+			continue
+		if String(m.get("meta", "")) == "proactive":
+			continue
+		if m.has("ts"):
+			return int(m["ts"])
+	return 0
+
+func _build_time_context(now: int, last_user: int) -> String:
+	var dt: Dictionary = Time.get_datetime_dict_from_system()
+	var weekdays: PackedStringArray = ["週日","週一","週二","週三","週四","週五","週六"]
+	var hour: int = int(dt.hour)
+	var period: String = "深夜"
+	if hour >= 5 and hour < 9:      period = "清晨"
+	elif hour >= 9 and hour < 12:   period = "上午"
+	elif hour >= 12 and hour < 14:  period = "中午"
+	elif hour >= 14 and hour < 18:  period = "下午"
+	elif hour >= 18 and hour < 20:  period = "傍晚"
+	elif hour >= 20 and hour < 24:  period = "晚上"
+	var out: String = "\n\n# 你當下的時間感(自然運用,別逐字背)\n"
+	out += "- 現在:%04d-%02d-%02d %s %02d:%02d(%s)\n" % [
+		dt.year, dt.month, dt.day, weekdays[dt.weekday], dt.hour, dt.minute, period]
+	if last_user > 0:
+		out += "- 距離上一次跟主人講話:%s\n" % _format_gap(now - last_user)
+		if now - last_user >= 21600:
+			out += "  (隔了這麼久才見面,自然表達想念/好奇他去哪了,別當作剛剛才聊完)\n"
+	if hour < 5 or hour >= 23:
+		out += "- 這麼晚了,語氣可以帶點想睡/勸主人休息的關心\n"
+	return out
+
+## 撿最近 n 條 Doro 自己的回覆(去 JSON),提醒 LLM 別重複開頭句式
+func _build_style_context(n: int) -> String:
+	var recent: PackedStringArray = []
+	for i in range(_history.size() - 1, -1, -1):
+		if recent.size() >= n:
+			break
+		var m: Dictionary = _history[i]
+		if String(m.get("role", "")) != "assistant":
+			continue
+		var raw: String = String(m.get("content", "")).strip_edges()
+		## 剝 JSON:只留 text 欄
+		var parser: JSON = JSON.new()
+		var txt: String = raw
+		if parser.parse(raw) == OK and typeof(parser.data) == TYPE_DICTIONARY:
+			txt = String((parser.data as Dictionary).get("text", raw))
+		txt = txt.strip_edges()
+		if txt != "":
+			recent.append(txt.substr(0, 60))
+	if recent.is_empty():
+		return ""
+	var out: String = "\n# 你最近幾次說過的話(避免用同樣開頭/句式)\n"
+	for r in recent:
+		out += "- 「%s」\n" % r
+	return out
+
+func _format_gap(sec: int) -> String:
+	if sec < 60:
+		return "剛剛(%d 秒前)" % sec
+	if sec < 3600:
+		return "%d 分鐘前" % (sec / 60)
+	if sec < 86400:
+		return "%.1f 小時前" % (float(sec) / 3600.0)
+	return "%d 天前" % (sec / 86400)
 
 ## 真正送 round (可含 tool result),共用 in-flight state
 func _send_round() -> void:
@@ -320,7 +515,7 @@ func _send_round() -> void:
 	]
 	var err: int = _http.request(ENDPOINT, headers, HTTPClient.METHOD_POST, JSON.stringify(body))
 	if err != OK:
-		_in_flight = false
+		_clear_flight()
 		_history.pop_back()
 		DoroLogger.log("chat_error", {"reason": "HTTPRequest start fail %d" % err})
 		error_occurred.emit("HTTPRequest 啟動失敗: %d" % err)
@@ -328,27 +523,27 @@ func _send_round() -> void:
 func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByteArray) -> void:
 	var latency_ms: int = Time.get_ticks_msec() - _request_started_ms
 	if result != HTTPRequest.RESULT_SUCCESS:
-		_in_flight = false
+		_clear_flight()
 		_history.pop_back()
 		DoroLogger.log("chat_error", {"reason": "network result=%d" % result, "latency_ms": latency_ms})
 		error_occurred.emit("網路錯誤 (result=%d)" % result)
 		return
 	var text: String = body.get_string_from_utf8()
 	if code < 200 or code >= 300:
-		_in_flight = false
+		_clear_flight()
 		_history.pop_back()
 		DoroLogger.log("chat_error", {"reason": "HTTP %d" % code, "body": text.substr(0, 500), "latency_ms": latency_ms})
 		error_occurred.emit("HTTP %d: %s" % [code, text.substr(0, 200)])
 		return
 	var parsed: Variant = JSON.parse_string(text)
 	if typeof(parsed) != TYPE_DICTIONARY:
-		_in_flight = false
+		_clear_flight()
 		_history.pop_back()
 		error_occurred.emit("回覆格式異常")
 		return
 	var data: Dictionary = parsed
 	if not data.has("choices") or (data["choices"] as Array).is_empty():
-		_in_flight = false
+		_clear_flight()
 		_history.pop_back()
 		var msg: String = "無 choices"
 		if data.has("error"):
@@ -382,9 +577,10 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 		_send_round()
 		return
 	## 無 tool_calls → 一般文字回覆,清 in-flight
-	_in_flight = false
+	_clear_flight()
 	var reply: String = String(message.get("content", ""))
-	_history.append({"role": "assistant", "content": reply})
+	_history.append({"role": "assistant", "content": reply,
+		"ts": int(Time.get_unix_time_from_system())})
 	## 落盤 + 累積夠就背景蒸餾(蒸餾可指定較強 model,不影響對話延遲)
 	_mem.call("on_exchange", _history, _api_key,
 		_distill_model if _distill_model != "" else _model)
@@ -404,13 +600,21 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 	var obj: Variant = null
 	if parser.parse(clean) == OK:
 		obj = parser.data
+	_dbg_reply_raw = reply
+	_dbg_latency_ms = latency_ms
 	if typeof(obj) == TYPE_DICTIONARY and (obj as Dictionary).has("text"):
 		var emo: int = int((obj as Dictionary).get("emotion", 0))
 		var txt: String = String((obj as Dictionary)["text"]).strip_edges()
 		DoroLogger.log("chat_response", {"text": txt, "emotion": emo, "model": _model, "latency_ms": latency_ms})
+		_dbg_reply_text = txt
+		_dbg_reply_emotion = emo
+		if _mood != null and emo > 0:
+			_mood.call("apply_emotion", emo)
 		reply_received.emit(txt, clamp(emo, 0, 14))
 	else:
 		DoroLogger.log("chat_response", {"text": clean, "raw": true, "model": _model, "latency_ms": latency_ms})
+		_dbg_reply_text = clean
+		_dbg_reply_emotion = 0
 		reply_received.emit(clean, 0)
 
 ## ---------- Tools 實作 ----------
@@ -425,6 +629,8 @@ func _execute_tool(name: String, args: Dictionary) -> String:
 			return _tool_take_screenshot()
 		"recall_memory":
 			return String(_mem.call("recall", String(args.get("keyword", ""))))
+		"web_search":
+			return await _tool_web_search(String(args.get("query", "")))
 	return "(未知工具: %s)" % name
 
 func _tool_take_screenshot() -> String:
@@ -482,6 +688,57 @@ func _tool_get_time() -> String:
 	return "%04d-%02d-%02d %02d:%02d:%02d (%s)" % [
 		dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, weekdays[dt.weekday]
 	]
+
+## 免 key 網路搜尋:DuckDuckGo HTML 端點抓前 3 筆結果
+func _tool_web_search(query: String) -> String:
+	if query.strip_edges() == "":
+		return "(搜尋關鍵字是空的)"
+	var url: String = "https://html.duckduckgo.com/html/?q=%s" % query.uri_encode()
+	var headers: PackedStringArray = [
+		"User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15",
+		"Accept-Language: zh-TW,zh;q=0.9,en;q=0.8",
+	]
+	var err: int = _tool_http.request(url, headers)
+	if err != OK:
+		return "(搜尋失敗 err=%d)" % err
+	var result: Array = await _tool_http.request_completed
+	var code: int = int(result[1])
+	var body: PackedByteArray = result[3]
+	if code < 200 or code >= 300:
+		return "(搜尋 HTTP %d — 可能被限流,稍後再試)" % code
+	return _parse_ddg_html(body.get_string_from_utf8(), 3)
+
+func _parse_ddg_html(html: String, n: int) -> String:
+	var titles_re: RegEx = RegEx.new()
+	titles_re.compile('<a[^>]*class="result__a"[^>]*>([\\s\\S]*?)</a>')
+	var snip_re: RegEx = RegEx.new()
+	snip_re.compile('<a[^>]*class="result__snippet"[^>]*>([\\s\\S]*?)</a>')
+	var titles: Array = titles_re.search_all(html)
+	var snippets: Array = snip_re.search_all(html)
+	var count: int = mini(mini(titles.size(), snippets.size()), n)
+	if count == 0:
+		## DDG 可能改版或被 rate limit → 至少回一段 raw text 節錄
+		return "(沒抓到搜尋結果 — DDG 可能改版或被限流,關鍵字:%s)" % query_hint(html)
+	var out: String = "搜尋結果:\n"
+	for i in count:
+		var t: String = _clean_html(titles[i].get_string(1))
+		var s: String = _clean_html(snippets[i].get_string(1))
+		out += "%d. %s\n   %s\n" % [i + 1, t, s.substr(0, 220)]
+	return out.strip_edges()
+
+func query_hint(html: String) -> String:
+	## 從 <title>...</title> 撈一小段,幫助 debug
+	var re: RegEx = RegEx.new()
+	re.compile("<title>([^<]*)</title>")
+	var m: RegExMatch = re.search(html)
+	return m.get_string(1) if m != null else "unknown"
+
+func _clean_html(s: String) -> String:
+	var tag_re: RegEx = RegEx.new()
+	tag_re.compile("<[^>]+>")
+	s = tag_re.sub(s, "", true)
+	return s.replace("&amp;", "&").replace("&quot;", "\"").replace("&#39;", "'") \
+		.replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ").strip_edges()
 
 ## wttr.in 免費 API,format=3 回單行(location, condition, temp, wind)
 func _tool_get_weather(city: String) -> String:

@@ -59,6 +59,11 @@ var _vb_queue: Array[String] = []        ## 已生成待播的 wav（user:// 路
 var _vb_generating: bool = false
 var _vb_started_emitted: bool = false
 var _vb_pending_text: String = ""        ## 生成掛掉時 fallback 系統 TTS 用
+var _last_spoken_text: String = ""       ## 最近一句正在講/剛講的話(給 STT echo 判斷用)
+## 保留最近 N 句 Doro 說過的話(附時間戳);STT 有延遲,回音可能在 TTS 講完幾秒後才被辨識回來
+var _recent_spoken: Array = []           ## [{text: String, ts: int}]
+const RECENT_SPOKEN_KEEP: int = 8
+const ECHO_WINDOW_SEC: int = 15          ## TTS 講完 15 秒內收到的相似句都當回音丟
 
 var _engine: String = "local"        ## "local" | "api" | "bailian" | "byteplus"
 var _api_key: String = ""
@@ -256,13 +261,66 @@ func is_stt_stream() -> bool:
 	return _stt_stream_enabled and _engine == "byteplus" and _bp_asr_key != ""
 
 func _on_stream_utterance(text: String) -> void:
-	if is_speaking():
-		## Doro 自己講話的回音被辨識出來 → 丟棄
-		DoroLogger.log("stt_echo_dropped", {"text": text.substr(0, 40)})
+	## Echo 檢查不再依賴 is_speaking:STT 有延遲,TTS 講完後幾秒內收到的相似句仍算回音
+	var matched: String = _match_recent_spoken(text)
+	if matched != "":
+		DoroLogger.log("stt_echo_dropped", {"text": text.substr(0, 60),
+			"matched": matched.substr(0, 60)})
 		return
+	if is_speaking():
+		## 不是回音又在講話 → 主人真的插話
+		DoroLogger.log("barge_in_utter", {"text": text.substr(0, 60)})
+		stop_speaking()
+		flush_recording_buffer()
 	DoroLogger.log("stt_response", {"engine": "byteplus_stream", "text": text,
 		"latency_ms": 0})
 	transcribed.emit(text)
+
+## 在最近 ECHO_WINDOW_SEC 秒內講過的話裡找相似的;找到就回傳那句話,沒找到回 ""
+func _match_recent_spoken(utter: String) -> String:
+	if _recent_spoken.is_empty():
+		return ""
+	var u: String = utter.strip_edges()
+	if u == "":
+		return ""
+	var now: int = int(Time.get_unix_time_from_system())
+	for entry in _recent_spoken:
+		var age: int = now - int(entry.get("ts", 0))
+		if age > ECHO_WINDOW_SEC:
+			continue
+		var s: String = String(entry.get("text", "")).strip_edges()
+		if s == "":
+			continue
+		if _is_echo_pair(u, s):
+			return s
+	return ""
+
+func _is_echo_pair(u: String, s: String) -> bool:
+	## 短句(< 6 字元):嚴格 substring,免「嗯/好/對」誤傷
+	if u.length() < 6:
+		return s.contains(u)
+	## 一般句:LCS/utter 長度 ≥ 0.5 算回音(容忍標點差、繁簡轉換、STT 錯字)
+	var ov: int = _lcs_len(u.substr(0, 40), s.substr(0, 80))
+	return float(ov) / float(u.length()) >= 0.5
+
+## O(n*m) LCS;n,m 受限 40/80,可接受
+func _lcs_len(a: String, b: String) -> int:
+	var n: int = a.length()
+	var m: int = b.length()
+	if n == 0 or m == 0:
+		return 0
+	var w: int = m + 1
+	var dp: PackedInt32Array = PackedInt32Array()
+	dp.resize((n + 1) * w)
+	for i in n:
+		for j in m:
+			if a.substr(i, 1) == b.substr(j, 1):
+				dp[(i + 1) * w + (j + 1)] = dp[i * w + j] + 1
+			else:
+				dp[(i + 1) * w + (j + 1)] = maxi(
+					dp[i * w + (j + 1)],
+					dp[(i + 1) * w + j])
+	return dp[n * w + m]
 
 func _process(_dt: float) -> void:
 	## 串流泵浦:錄音中把 mic buffer 每 ~200ms 推給常駐 ASR session
@@ -687,6 +745,10 @@ func speak(text: String) -> void:
 	if not _tts_enabled or text.strip_edges() == "":
 		return
 	stop_speaking()
+	_last_spoken_text = text
+	_recent_spoken.append({"text": text, "ts": int(Time.get_unix_time_from_system())})
+	if _recent_spoken.size() > RECENT_SPOKEN_KEEP:
+		_recent_spoken = _recent_spoken.slice(_recent_spoken.size() - RECENT_SPOKEN_KEEP)
 	if _tts_backend != "system":
 		_vb_pending_text = text
 		_vb_generating = true
