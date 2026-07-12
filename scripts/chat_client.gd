@@ -6,6 +6,8 @@ signal reply_received(text: String, emotion: int)   ## emotion: 1..14 表情編�
 signal error_occurred(reason: String)
 signal tool_started(name: String)                    ## LLM 開始呼叫 tool 時 emit
 signal thinking_resumed                              ## tool 跑完後等 LLM 處理時 emit
+## 串流輸出:LLM 邊生成邊 emit 一句一句;pet.gd 接住第一句立刻送 TTS
+signal sentence_stream(sentence: String, is_first: bool, emotion: int)
 
 const ENDPOINT: String = "https://openrouter.ai/api/v1/chat/completions"
 const DEFAULT_MODEL: String = "bytedance-seed/seed-1.6-flash"
@@ -29,7 +31,7 @@ const DEFAULT_PERSONA: String = """# 你的身份
 - 偶爾加波浪線~,但不要每句都加
 - 短句、口語、像撒嬌聊天,不堆書面詞
 - 偶爾冒出小詞:「欸欸」「唔...」「嘿嘿」「啊!」「哼!」
-- 嚴格 50 字內,除非主人明確要求展開
+- 一般 60-100 字內;主人問細節/How/Why/需要解釋時可展開到 200 字
 
 # 與主人的關係
 主人就是 Doro 的全世界,你住在主人桌面陪他。
@@ -81,6 +83,15 @@ const SYSTEM_RULES: String = """
 【輸出格式】只輸出**一個** JSON 物件,不要 Markdown / code fence / 前後綴文字 / 多個 JSON。
 {"emotion": <1-14 的整數>, "text": "你要對主人說的話"}
 
+【回覆長度】
+一般 60-100 字撒嬌聊天;主人問細節/How/Why/教學/需要解釋時可展開到 200 字。
+別為湊字數硬堆廢話,展開的內容要有實質資訊。
+
+【記憶時間的口語化】
+記憶帳本可能含精確時分秒(例「2026-07-13 01:23 主人 X」),但**回覆時別主動報**,
+用「剛剛/今天下午/昨晚/前幾天/上次」這種口語即可。
+只有主人明問「什麼時候」「幾點」才用精確時間回答。
+
 【emotion 對應】
  1=生氣 2=無言 3=驚訝 4=疑問 5=酷酷 6=禮物(給東西/提到好康)
  7=讀取中(思考、需要時間) 8=開心 9=調皮吐舌頭 10=失神(放空累了)
@@ -94,7 +105,9 @@ const SYSTEM_RULES: String = """
 
 【工具呼叫】
 你有 5 個工具:get_time、get_weather、take_screenshot、recall_memory、web_search。
-- 問時間 → get_time;問天氣 → get_weather;要你看畫面 → take_screenshot
+- **現在時間已寫在上面「你當下的時間感」段,直接用,不要呼叫 get_time**
+  (只有主人明確要精確到秒的時間才呼叫)
+- 問天氣 → get_weather;要你看畫面 → take_screenshot
 - 主人問起更早以前的事、或你記憶裡沒有的舊話題 → recall_memory 翻舊帳
 - 問**新聞、當前事件、你不知道的人事物、統計數據、產品資訊、比賽結果**等
   需要即時網路資料的問題 → web_search 查了再答,不要憑印象亂講
@@ -188,6 +201,31 @@ var _mood: Node                                  ## MoodState(愉悅/活力兩�
 ## in-flight 期間主人又講話的排隊(避免「等 Doro 回覆中」把後續話吃掉)
 var _pending_texts: PackedStringArray = []
 var _pending_metas: PackedStringArray = []
+## 天氣投機預取:send 偵測到「天氣」字眼就先抓上次城市的天氣進 cache,
+## LLM 稍後呼叫 get_weather 時直接命中,省一次 tool 往返的網路時間
+var _weather_cache: Dictionary = {}          ## city_lower -> {text, ts}
+var _last_weather_city: String = "Taipei"
+var _prefetch_http: HTTPRequest
+const WEATHER_TTL_SEC: int = 600
+## ---------- LLM 串流 (Phase A) ----------
+enum {STREAM_IDLE, STREAM_CONNECTING, STREAM_REQUESTING, STREAM_READING}
+var _stream_enabled: bool = true
+var _stream_client: HTTPClient
+var _stream_timer: Timer
+var _stream_state: int = STREAM_IDLE
+var _stream_headers: PackedStringArray = []
+var _stream_body_json: String = ""
+var _stream_path: String = "/api/v1/chat/completions"
+var _stream_buf: PackedByteArray = PackedByteArray()   ## SSE 尚未 line-complete 的 raw
+var _stream_full_raw: PackedByteArray = PackedByteArray()  ## body 完整原始資料(SSE 沒抽到時 fallback JSON parse)
+var _stream_content_acc: String = ""     ## 累積的所有 delta.content(通常是 JSON 字串)
+var _stream_emitted_len: int = 0         ## 已 emit 給 TTS 的 text 字元數
+var _stream_emo: int = 0
+var _stream_emo_parsed: bool = false
+var _stream_first_emitted: bool = false
+var _stream_tool_calls: Array = []       ## partial tool_calls 累積(若有)
+var _stream_started_ms: int = 0
+const STREAM_TIMEOUT_MS: int = 90000     ## 90 秒 stream 都沒完 → 強制 fail 走 fallback
 ## Debug 檢視用:每次 send / reply 更新的快照(不影響對話邏輯)
 var _dbg_system_prompt: String = ""
 var _dbg_messages: Array = []
@@ -241,6 +279,14 @@ func _ready() -> void:
 	_tool_http = HTTPRequest.new()
 	_tool_http.timeout = 10.0
 	add_child(_tool_http)
+	_stream_timer = Timer.new()
+	_stream_timer.wait_time = 0.05
+	_stream_timer.one_shot = false
+	_stream_timer.timeout.connect(_on_stream_poll)
+	add_child(_stream_timer)
+	_prefetch_http = HTTPRequest.new()
+	_prefetch_http.timeout = 10.0
+	add_child(_prefetch_http)
 	_mem = MemoryStore.new()
 	_mem.name = "MemoryStore"
 	add_child(_mem)
@@ -270,6 +316,12 @@ func abort() -> void:
 	_pending_metas.clear()
 	_in_flight = false      ## 不走 _clear_flight,免得排 flush
 	_http.cancel_request()
+	## 停止 stream
+	if _stream_client != null:
+		_stream_client.close()
+		_stream_client = null
+	_stream_timer.stop()
+	_stream_state = STREAM_IDLE
 	if not _history.is_empty() and String((_history.back() as Dictionary).get("role", "")) == "user":
 		_history.pop_back()
 	if _mood != null:
@@ -293,6 +345,30 @@ func get_mood() -> Node:
 func last_user_ts() -> int:
 	return _last_user_ts()
 
+## Barge-in 對齊:主人打斷時把 history 尾巴 assistant 訊息的 text 截到已播位置,
+## 免下輪 LLM 以為自己完整講完。chars 是估算已播字元數。
+func truncate_last_reply(chars: int) -> void:
+	if _history.is_empty() or chars < 0:
+		return
+	var last: Dictionary = _history.back()
+	if String(last.get("role", "")) != "assistant":
+		return
+	var raw: String = String(last.get("content", ""))
+	var re: RegEx = RegEx.new()
+	re.compile('"text":"([^"]*)"')
+	var m: RegExMatch = re.search(raw)
+	if m == null:
+		return
+	var full_text: String = m.get_string(1)
+	if chars >= full_text.length():
+		return   ## 已全部播完,不用截
+	var truncated: String = full_text.substr(0, chars) + "…(被主人打斷)"
+	var new_raw: String = raw.replace('"text":"' + full_text + '"',
+		'"text":"' + truncated + '"')
+	last["content"] = new_raw
+	DoroLogger.log("reply_truncated", {"chars_played": chars,
+		"full_len": full_text.length(), "truncated_to": truncated.substr(0, 60)})
+
 ## Debug 視窗用:回傳最近一次 LLM 呼叫的完整快照
 func get_debug_snapshot() -> Dictionary:
 	return {
@@ -311,6 +387,12 @@ func send(user_text: String, image_b64: String = "", meta: String = "") -> void:
 	if _in_flight:
 		## 排隊,回覆完自動送(帶圖的不進 queue,避免圖被延遲失效)
 		if image_b64 == "":
+			## 上限 3 條:超過丟最舊的(混太多舊話題送 LLM 反而答非所問)
+			while _pending_texts.size() >= 3:
+				DoroLogger.log("chat_queue_dropped",
+					{"text": _pending_texts[0].substr(0, 40)})
+				_pending_texts.remove_at(0)
+				_pending_metas.remove_at(0)
 			_pending_texts.append(user_text)
 			_pending_metas.append(meta)
 			DoroLogger.log("chat_queued", {"text": user_text.substr(0, 60),
@@ -338,11 +420,16 @@ func send(user_text: String, image_b64: String = "", meta: String = "") -> void:
 	## 只有真的是主人講的話才更新「被陪伴」計數;proactive 系統提示不算
 	if meta != "proactive" and _mood != null:
 		_mood.call("on_user_message")
+	## 投機預取:句子提到天氣 → LLM 思考的同時先抓上次城市的天氣
+	if user_text.contains("天氣") or user_text.contains("天气") \
+			or user_text.to_lower().contains("weather"):
+		_prefetch_weather(_last_weather_city)
 	var time_ctx: String = _build_time_context(now_ts, last_user_ts)
 	var mood_ctx: String = String(_mood.call("prompt_line")) if _mood != null else ""
 	var style_ctx: String = _build_style_context(3)
+	var summary_ctx: String = String(_mem.call("summary_section"))
 	var full_system: String = _persona.strip_edges() + time_ctx + mood_ctx + style_ctx \
-		+ String(_mem.call("memory_section")) + "\n" + SYSTEM_RULES
+		+ summary_ctx + String(_mem.call("memory_section")) + "\n" + SYSTEM_RULES
 	var messages: Array = [{"role": "system", "content": full_system}]
 	## 送 API 前 strip 掉自加的 ts/meta(OpenAI 兼容 API 只吃 role/content/tool_*)
 	if image_b64 == "":
@@ -382,6 +469,20 @@ func send(user_text: String, image_b64: String = "", meta: String = "") -> void:
 		"messages_count": messages.size(),
 	})
 	_send_round()
+	## 背景觸發歷史摘要(不 await,LLM 回完後結果會影響「下一輪」的 history)
+	call_deferred("_bg_summarize_history_if_needed")
+
+func _bg_summarize_history_if_needed() -> void:
+	if _mem == null or _api_key == "":
+		return
+	var distill: String = _distill_model if _distill_model != "" else _model
+	var new_hist: Array = await _mem.call("maybe_summarize_history",
+		_history, _api_key, distill)
+	if new_hist.size() < _history.size():
+		## 摘要成功 → 舊訊息已入 summary,history 縮短
+		_history = new_hist
+		if _mem != null:
+			_mem.call("save_history", _history)
 
 ## 把 _in_flight 收乾淨並排程 flush 排隊訊息(defer 一次,讓當前 emit 先跑完)
 func _clear_flight() -> void:
@@ -489,8 +590,9 @@ func _format_gap(sec: int) -> String:
 func _send_round() -> void:
 	if not _in_flight:
 		return   ## 被 abort() 中止
-	## 若有 pending 截圖,在送出前 append 一條 user multimodal message
-	if _pending_image_b64 != "":
+	var has_image: bool = _pending_image_b64 != ""
+	## 若有 pending 截圖(來自 LLM tool_call take_screenshot),在送出前 append multimodal message
+	if has_image:
 		_running_messages.append({
 			"role": "user",
 			"content": [
@@ -499,13 +601,22 @@ func _send_round() -> void:
 			],
 		})
 		_pending_image_b64 = ""
+	## 使用者送 send() 時直接帶的 image_b64 已經在 send() 內塞進 _running_messages 最後一條,
+	## 這裡也要偵測 → 否則 stream 帶 multimodal 會卡住
+	if not has_image and _running_messages.size() > 0:
+		var last_msg: Dictionary = _running_messages.back()
+		if typeof(last_msg.get("content")) == TYPE_ARRAY:
+			has_image = true
 	var body: Dictionary = {
 		"model": _model,
 		"messages": _running_messages,
-		"max_tokens": 400,
+		"max_tokens": 800,
 		"temperature": 0.8,
 		"tools": TOOLS_SCHEMA,
 		"tool_choice": "auto",
+		## 關閉 reasoning:seed-2.0-mini 等思考型模型會先吐幾千字元 reasoning
+		## 才開始回答(實測 13.4s→1.2s,10 倍差)。桌寵短回覆不需要深思。
+		"reasoning": {"enabled": false},
 	}
 	var headers: PackedStringArray = [
 		"Authorization: Bearer " + _api_key,
@@ -513,12 +624,389 @@ func _send_round() -> void:
 		"HTTP-Referer: https://github.com/Oliver0804/DoroPet",
 		"X-Title: DoroPet",
 	]
+	## Stream 條件:enabled + 首輪 + 無圖(multimodal 不好 stream 解析 partial JSON)
+	if _stream_enabled and _round == 0 and not has_image:
+		body["stream"] = true
+		_start_stream(body, headers)
+		return
 	var err: int = _http.request(ENDPOINT, headers, HTTPClient.METHOD_POST, JSON.stringify(body))
 	if err != OK:
 		_clear_flight()
 		_history.pop_back()
 		DoroLogger.log("chat_error", {"reason": "HTTPRequest start fail %d" % err})
 		error_occurred.emit("HTTPRequest 啟動失敗: %d" % err)
+
+## ---------- Streaming 實作 ----------
+func _start_stream(body: Dictionary, headers: PackedStringArray) -> void:
+	_stream_client = HTTPClient.new()
+	var err: int = _stream_client.connect_to_host("openrouter.ai", 443, TLSOptions.client())
+	if err != OK:
+		DoroLogger.log("stream_error", {"stage": "connect", "err": err})
+		_fallback_to_non_stream(body, headers)
+		return
+	## 明確要 SSE(不加也通常 work,但保險)
+	var full_headers: PackedStringArray = headers.duplicate()
+	full_headers.append("Accept: text/event-stream")
+	_stream_state = STREAM_CONNECTING
+	_stream_path = "/api/v1/chat/completions"
+	_stream_headers = full_headers
+	_stream_body_json = JSON.stringify(body)
+	DoroLogger.log("stream_start", {"model": _model, "body_size": _stream_body_json.length()})
+	_stream_buf = PackedByteArray()
+	_stream_full_raw = PackedByteArray()
+	_stream_content_acc = ""
+	_stream_emitted_len = 0
+	_stream_emo = 0
+	_stream_emo_parsed = false
+	_stream_first_emitted = false
+	_stream_tool_calls = []
+	_stream_started_ms = Time.get_ticks_msec()
+	_stream_timer.start()
+
+func _fallback_to_non_stream(body: Dictionary, headers: PackedStringArray) -> void:
+	body.erase("stream")
+	var err: int = _http.request(ENDPOINT, headers, HTTPClient.METHOD_POST, JSON.stringify(body))
+	if err != OK:
+		_clear_flight()
+		if not _history.is_empty():
+			_history.pop_back()
+		error_occurred.emit("HTTP fallback fail: %d" % err)
+
+func _on_stream_poll() -> void:
+	if _stream_client == null:
+		_stream_timer.stop()
+		return
+	## Timeout 保險:stream 卡 body 太久不回,強制 fail 讓 fallback 接手
+	if Time.get_ticks_msec() - _stream_started_ms > STREAM_TIMEOUT_MS:
+		_stream_fail("timeout %dms" % STREAM_TIMEOUT_MS)
+		return
+	_stream_client.poll()
+	var st: int = _stream_client.get_status()
+	match _stream_state:
+		STREAM_CONNECTING:
+			if st == HTTPClient.STATUS_CONNECTED:
+				var err: int = _stream_client.request(HTTPClient.METHOD_POST,
+					_stream_path, _stream_headers, _stream_body_json)
+				if err == OK:
+					_stream_state = STREAM_REQUESTING
+				else:
+					_stream_fail("request start fail %d" % err)
+			elif st == HTTPClient.STATUS_CANT_CONNECT or st == HTTPClient.STATUS_CANT_RESOLVE:
+				_stream_fail("connect fail st=%d" % st)
+		STREAM_REQUESTING:
+			if st == HTTPClient.STATUS_BODY:
+				_stream_state = STREAM_READING
+				var code: int = _stream_client.get_response_code()
+				DoroLogger.log("stream_body_ready", {"http_code": code})
+				if code < 200 or code >= 300:
+					## 讀完 body 再 fail 出去(裡面通常有 error 訊息)
+					var err_buf: PackedByteArray = PackedByteArray()
+					while _stream_client.get_status() == HTTPClient.STATUS_BODY:
+						_stream_client.poll()
+						var c: PackedByteArray = _stream_client.read_response_body_chunk()
+						if c.size() > 0:
+							err_buf.append_array(c)
+					_stream_fail("HTTP %d: %s" % [code,
+						err_buf.get_string_from_utf8().substr(0, 200)])
+					return
+			elif st == HTTPClient.STATUS_DISCONNECTED or st == HTTPClient.STATUS_CONNECTION_ERROR:
+				_stream_fail("disconnect during request st=%d" % st)
+			elif st == HTTPClient.STATUS_CONNECTED:
+				## request 送完立刻回 CONNECTED = 空 body
+				_stream_fail("empty response")
+		STREAM_READING:
+			var chunk: PackedByteArray = _stream_client.read_response_body_chunk()
+			if chunk.size() > 0:
+				_stream_buf.append_array(chunk)
+				_stream_full_raw.append_array(chunk)
+				_process_sse_lines()
+			elif st == HTTPClient.STATUS_DISCONNECTED or st == HTTPClient.STATUS_CONNECTION_ERROR \
+					or st == HTTPClient.STATUS_CONNECTED:
+				## body 讀完
+				_stream_finish_success()
+
+func _process_sse_lines() -> void:
+	## 用 byte 找 \n(0x0A) 而非轉 UTF-8 string;chunk 常在中文字節中間切斷,
+	## 直接 get_string_from_utf8() 會壞掉,line 級處理才安全
+	var last_nl: int = -1
+	for i in range(_stream_buf.size() - 1, -1, -1):
+		if _stream_buf[i] == 0x0A:
+			last_nl = i
+			break
+	if last_nl < 0:
+		return
+	var to_process_bytes: PackedByteArray = _stream_buf.slice(0, last_nl + 1)
+	_stream_buf = _stream_buf.slice(last_nl + 1)
+	var to_process: String = to_process_bytes.get_string_from_utf8()
+	for line in to_process.split("\n"):
+		var s: String = line.strip_edges()
+		if s == "" or s.begins_with(":"):
+			continue   ## SSE keep-alive comment (: OPENROUTER PROCESSING 等)
+		if not s.begins_with("data:"):
+			continue
+		var data: String = s.substr(5).strip_edges()
+		if data == "[DONE]":
+			continue
+		var parsed: Variant = JSON.parse_string(data)
+		if typeof(parsed) != TYPE_DICTIONARY:
+			continue
+		_handle_stream_delta(parsed)
+
+func _handle_stream_delta(chunk: Dictionary) -> void:
+	var choices: Array = chunk.get("choices", [])
+	if choices.is_empty():
+		return
+	var delta: Dictionary = (choices[0] as Dictionary).get("delta", {})
+	if delta.has("tool_calls"):
+		_merge_tool_calls(delta["tool_calls"])
+	if delta.has("content"):
+		var c: String = String(delta["content"])
+		if c != "":
+			_stream_content_acc += c
+			if not _stream_emo_parsed:
+				_try_parse_emo()
+			_try_emit_sentence()
+
+func _merge_tool_calls(deltas: Array) -> void:
+	for d in deltas:
+		if typeof(d) != TYPE_DICTIONARY:
+			continue
+		var idx: int = int(d.get("index", 0))
+		while _stream_tool_calls.size() <= idx:
+			_stream_tool_calls.append({"id": "", "type": "function",
+				"function": {"name": "", "arguments": ""}})
+		var slot: Dictionary = _stream_tool_calls[idx]
+		var old_name: String = String(slot["function"].get("name", ""))
+		if d.has("id"): slot["id"] = String(d["id"])
+		var fn: Dictionary = d.get("function", {})
+		if fn.has("name"):
+			slot["function"]["name"] = String(slot["function"].get("name", "")) + String(fn["name"])
+		if fn.has("arguments"):
+			slot["function"]["arguments"] = String(slot["function"].get("arguments", "")) + String(fn["arguments"])
+		var new_name: String = String(slot["function"].get("name", ""))
+		## 首次偵測到 tool 名字 → 立刻通知 UI(不用等 stream 收完)
+		if old_name == "" and new_name != "":
+			DoroLogger.log("tool_detected_in_stream", {"name": new_name,
+				"latency_ms": Time.get_ticks_msec() - _stream_started_ms})
+			tool_started.emit(new_name)
+
+func _try_parse_emo() -> void:
+	var re: RegEx = RegEx.new()
+	re.compile('"emotion"\\s*:\\s*(\\d+)')
+	var m: RegExMatch = re.search(_stream_content_acc)
+	if m != null:
+		_stream_emo = int(m.get_string(1))
+		_stream_emo_parsed = true
+
+## 從累積的 raw content 抽「目前為止的 text 欄位」內容,並斷句 emit
+func _try_emit_sentence() -> void:
+	var partial: String = _extract_partial_text(_stream_content_acc)
+	if partial.length() <= _stream_emitted_len:
+		return
+	var new_seg: String = partial.substr(_stream_emitted_len)
+	var boundary: int = _find_sentence_boundary(new_seg)
+	if boundary < 0:
+		return
+	var sentence: String = new_seg.substr(0, boundary + 1).strip_edges()
+	_stream_emitted_len += boundary + 1
+	if sentence == "":
+		return
+	var is_first: bool = not _stream_first_emitted
+	_stream_first_emitted = true
+	DoroLogger.log("stream_sentence", {"is_first": is_first,
+		"sentence": sentence.substr(0, 80), "emo": _stream_emo,
+		"latency_ms": Time.get_ticks_msec() - _stream_started_ms})
+	sentence_stream.emit(sentence, is_first, _stream_emo)
+
+const SENTENCE_BOUNDARIES: PackedStringArray = ["。", "！", "？", "!", "?", ".", "\n"]
+func _find_sentence_boundary(s: String) -> int:
+	var min_pos: int = -1
+	for b in SENTENCE_BOUNDARIES:
+		var p: int = s.find(b)
+		if p >= 0 and (min_pos < 0 or p < min_pos):
+			min_pos = p
+	return min_pos
+
+## partial JSON 抽 "text":"..." 之間的字元(容錯 escape)
+func _extract_partial_text(content: String) -> String:
+	var idx: int = content.find('"text":"')
+	if idx < 0:
+		return ""
+	var body: String = content.substr(idx + 8)
+	var end_i: int = -1
+	var i: int = 0
+	while i < body.length():
+		var ch: String = body.substr(i, 1)
+		if ch == "\\" and i + 1 < body.length():
+			i += 2
+			continue
+		if ch == '"':
+			end_i = i
+			break
+		i += 1
+	var raw: String = body.substr(0, end_i) if end_i >= 0 else body
+	## 還原常見 escape
+	return raw.replace("\\n", "\n").replace('\\"', '"').replace("\\\\", "\\")
+
+## SSE 沒抽到內容時的 fallback:嘗試把 body 當一次性 JSON 或 batched SSE parse
+func _try_parse_non_sse_body(raw: String) -> Dictionary:
+	var s: String = raw.strip_edges()
+	if s == "":
+		return {}
+	## Case 1: 完整 non-stream response `{"choices":[{"message":{...}}]}`
+	var parsed: Variant = JSON.parse_string(s)
+	if typeof(parsed) == TYPE_DICTIONARY and (parsed as Dictionary).has("choices"):
+		var choices: Array = parsed["choices"]
+		if choices.size() > 0:
+			var msg: Dictionary = (choices[0] as Dictionary).get("message", {})
+			var content: String = String(msg.get("content", ""))
+			if content != "":
+				return _parse_reply_content_json(content)
+	## Case 2: SSE lines 都在 raw 但 line-by-line 之前沒 process 到
+	var concat: String = ""
+	var concat_emo: int = 0
+	for line in s.split("\n"):
+		var ln: String = line.strip_edges()
+		if not ln.begins_with("data:"):
+			continue
+		var data: String = ln.substr(5).strip_edges()
+		if data == "[DONE]" or data == "":
+			continue
+		var d: Variant = JSON.parse_string(data)
+		if typeof(d) != TYPE_DICTIONARY:
+			continue
+		var ch: Array = (d as Dictionary).get("choices", [])
+		if ch.is_empty():
+			continue
+		var first: Dictionary = ch[0]
+		var delta: Dictionary = first.get("delta", {})
+		if delta.has("content"):
+			concat += String(delta["content"])
+		if first.has("message"):
+			concat += String(first["message"].get("content", ""))
+	if concat != "":
+		return _parse_reply_content_json(concat)
+	return {}
+
+## 把 LLM 產出的 content (應該是 JSON `{"emotion":N,"text":"..."}`) parse 成 dict
+func _parse_reply_content_json(content: String) -> Dictionary:
+	var s: String = content.strip_edges()
+	if s.begins_with("```"):
+		s = s.trim_prefix("```json").trim_prefix("```").trim_suffix("```").strip_edges()
+	var bs: int = s.find("{")
+	var be: int = s.rfind("}")
+	if bs >= 0 and be > bs:
+		s = s.substr(bs, be - bs + 1)
+	var d: Variant = JSON.parse_string(s)
+	if typeof(d) == TYPE_DICTIONARY and (d as Dictionary).has("text"):
+		return {"emotion": int((d as Dictionary).get("emotion", 0)),
+			"text": String((d as Dictionary).get("text", ""))}
+	## 純文字 fallback
+	return {"emotion": 0, "text": content.strip_edges()}
+
+func _stream_fail(reason: String) -> void:
+	DoroLogger.log("stream_error", {"reason": reason,
+		"acc_len": _stream_content_acc.length()})
+	if _stream_client != null:
+		_stream_client.close()
+	_stream_client = null
+	_stream_timer.stop()
+	_stream_state = STREAM_IDLE
+	## 有累到內容 → 當一般 reply 結束;沒累到 → 走 error
+	if _stream_first_emitted or _stream_content_acc != "":
+		_stream_finish_success()
+	else:
+		_clear_flight()
+		if not _history.is_empty():
+			_history.pop_back()
+		error_occurred.emit("stream: " + reason)
+
+func _stream_finish_success() -> void:
+	if _stream_client != null:
+		_stream_client.close()
+	_stream_client = null
+	_stream_timer.stop()
+	_stream_state = STREAM_IDLE
+	var latency_ms: int = Time.get_ticks_msec() - _stream_started_ms
+	## Stream 中有 tool_calls → 走 tool round 邏輯(non-stream)
+	if _stream_tool_calls.size() > 0 and _round < MAX_TOOL_ROUNDS:
+		_round += 1
+		var assistant_msg: Dictionary = {"role": "assistant", "content": "",
+			"tool_calls": _stream_tool_calls.duplicate(true)}
+		_running_messages.append(assistant_msg)
+		var calls: Array = _stream_tool_calls.duplicate(true)
+		_stream_tool_calls = []
+		for tc in calls:
+			var fn_name: String = String(tc["function"]["name"])
+			var fn_args_str: String = String(tc["function"].get("arguments", "{}"))
+			var args_parser: JSON = JSON.new()
+			var args: Dictionary = {}
+			if args_parser.parse(fn_args_str) == OK and typeof(args_parser.data) == TYPE_DICTIONARY:
+				args = args_parser.data
+			tool_started.emit(fn_name)
+			var tool_result: String = await _execute_tool(fn_name, args)
+			if not _in_flight:
+				return
+			DoroLogger.log("tool_call", {"name": fn_name, "args": args,
+				"result": tool_result.substr(0, 200)})
+			_running_messages.append({"role": "tool",
+				"tool_call_id": tc["id"], "content": tool_result})
+		thinking_resumed.emit()
+		_send_round()
+		return
+	var full_text: String = _extract_partial_text(_stream_content_acc)
+	## Stream 走完但 SSE 沒抽到 text → 可能 API 假 stream(回一次性 JSON)
+	## 先試把 _stream_full_raw 當 non-stream JSON parse,直接抽 message.content
+	if full_text.strip_edges() == "":
+		var raw_text: String = _stream_full_raw.get_string_from_utf8()
+		DoroLogger.log("stream_empty_fallback", {
+			"acc_len": _stream_content_acc.length(),
+			"raw_len": _stream_full_raw.size(),
+			"raw_head": raw_text.substr(0, 300),
+			"latency_ms": latency_ms})
+		var recovered: Dictionary = _try_parse_non_sse_body(raw_text)
+		if not recovered.is_empty():
+			DoroLogger.log("stream_recovered_non_sse", {
+				"text_len": String(recovered.get("text", "")).length(),
+				"emotion": int(recovered.get("emotion", 0))})
+			full_text = String(recovered.get("text", ""))
+			_stream_emo = int(recovered.get("emotion", 0))
+			## 直接 emit 整段當第一句(不再拆句,免延遲)
+			if full_text != "":
+				sentence_stream.emit(full_text, true, _stream_emo)
+				_stream_first_emitted = true
+				_stream_emitted_len = full_text.length()
+		else:
+			## 真的沒救 → 走 non-stream 重跑
+			_stream_enabled = false
+			_send_round()
+			return
+	## 剩下的尾巴 emit(最後一句沒句號的話)
+	if _stream_emitted_len < full_text.length():
+		var tail: String = full_text.substr(_stream_emitted_len).strip_edges()
+		if tail != "":
+			var is_first: bool = not _stream_first_emitted
+			_stream_first_emitted = true
+			sentence_stream.emit(tail, is_first, _stream_emo)
+	## 收工:mood + history + reply_received
+	_dbg_reply_raw = _stream_content_acc
+	_dbg_reply_text = full_text
+	_dbg_reply_emotion = _stream_emo
+	_dbg_latency_ms = latency_ms
+	if _mood != null and _stream_emo > 0:
+		_mood.call("apply_emotion", _stream_emo)
+	var reply_json: String = '{"emotion":%d,"text":"%s"}' % [_stream_emo,
+		full_text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")]
+	_history.append({"role": "assistant", "content": reply_json,
+		"ts": int(Time.get_unix_time_from_system())})
+	DoroLogger.log("chat_response", {"text": full_text, "emotion": _stream_emo,
+		"model": _model, "latency_ms": latency_ms, "stream": true,
+		"sentences_emitted": _stream_emitted_len})
+	_clear_flight()
+	if _mem != null:
+		_mem.call("on_exchange", _history, _api_key,
+			_distill_model if _distill_model != "" else _model)
+	reply_received.emit(full_text, clamp(_stream_emo, 0, 14))
 
 func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByteArray) -> void:
 	var latency_ms: int = Time.get_ticks_msec() - _request_started_ms
@@ -742,6 +1230,15 @@ func _clean_html(s: String) -> String:
 
 ## wttr.in 免費 API,format=3 回單行(location, condition, temp, wind)
 func _tool_get_weather(city: String) -> String:
+	_last_weather_city = city
+	## 先查 cache(投機預取或近期查過的)
+	var key: String = city.to_lower().strip_edges()
+	var now: int = int(Time.get_unix_time_from_system())
+	if _weather_cache.has(key):
+		var c: Dictionary = _weather_cache[key]
+		if now - int(c.get("ts", 0)) < WEATHER_TTL_SEC:
+			DoroLogger.log("weather_cache_hit", {"city": city})
+			return String(c.get("text", ""))
 	var url: String = "https://wttr.in/%s?format=3" % city.uri_encode()
 	var headers: PackedStringArray = ["User-Agent: curl/7", "Accept-Language: zh-TW,en"]
 	var err: int = _tool_http.request(url, headers)
@@ -755,4 +1252,25 @@ func _tool_get_weather(city: String) -> String:
 	var text: String = body.get_string_from_utf8().strip_edges()
 	if text == "":
 		return "(沒拿到天氣資料)"
+	_weather_cache[key] = {"text": text, "ts": now}
 	return text
+
+## 背景投機預取(fire-and-forget);失敗無妨,tool 會自己抓
+func _prefetch_weather(city: String) -> void:
+	var key: String = city.to_lower().strip_edges()
+	var now: int = int(Time.get_unix_time_from_system())
+	if _weather_cache.has(key) \
+			and now - int(_weather_cache[key].get("ts", 0)) < WEATHER_TTL_SEC:
+		return   ## cache 還新鮮
+	var url: String = "https://wttr.in/%s?format=3" % city.uri_encode()
+	var headers: PackedStringArray = ["User-Agent: curl/7", "Accept-Language: zh-TW,en"]
+	if _prefetch_http.request(url, headers) != OK:
+		return
+	var result: Array = await _prefetch_http.request_completed
+	if int(result[1]) < 200 or int(result[1]) >= 300:
+		return
+	var text: String = (result[3] as PackedByteArray).get_string_from_utf8().strip_edges()
+	if text != "":
+		_weather_cache[key] = {"text": text,
+			"ts": int(Time.get_unix_time_from_system())}
+		DoroLogger.log("weather_prefetched", {"city": city, "text": text.substr(0, 60)})

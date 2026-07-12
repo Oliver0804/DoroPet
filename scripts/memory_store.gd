@@ -14,6 +14,11 @@ const FACTS_PATH: String = "user://doro_facts.jsonl"
 const ARCHIVE_PATH: String = "user://doro_archive.jsonl"
 const META_PATH: String = "user://doro_memory_meta.json"
 const FOLLOWUPS_PATH: String = "user://doro_followups.jsonl"
+const SUMMARY_PATH: String = "user://doro_history_summary.txt"
+## Context 摘要:超過門檻就把舊訊息壓成摘要,取代直接 rollover 丟失
+const HISTORY_SUMMARIZE_THRESHOLD: int = 32   ## history 超過 32 條(16 turn)觸發
+const HISTORY_KEEP_VERBATIM: int = 12         ## 保留最後 12 條(6 turn)原文
+const SUMMARY_MAX_CHARS: int = 1500           ## 摘要本身上限,超過再壓縮
 const LEGACY_PATH: String = "user://doro_memory.txt"   ## v1 扁平筆記(遷移用)
 const DISTILL_EVERY: int = 12       ## 每 12 條訊息(6 輪)蒸餾一次
 const MAX_NEW_MSGS: int = 24        ## 單次蒸餾最多帶的新訊息數
@@ -30,20 +35,27 @@ const TYPE_ORDER: PackedStringArray = [
 
 var _facts: Array = []              ## [{id,type,text,created,updated}]
 var _followups: Array = []          ## [{id,due,text,created,consumed:bool}]
+var _history_summary: String = ""   ## 累積摘要 (chat_client 注入 prompt)
+var _summary_busy: bool = false
 var _next_id: int = 1
 var _next_followup_id: int = 1
 var _since_distill: int = 0
 var _last_consolidate: String = ""
 var _busy: bool = false
 var _http: HTTPRequest
+var _summary_http: HTTPRequest    ## 摘要專用,免跟蒸餾撞 _http
 
 func _ready() -> void:
 	_http = HTTPRequest.new()
 	_http.timeout = 120.0
 	add_child(_http)
+	_summary_http = HTTPRequest.new()
+	_summary_http.timeout = 60.0
+	add_child(_summary_http)
 	_load_facts()
 	_load_followups()
 	_load_meta()
+	_history_summary = _load_text(SUMMARY_PATH)
 
 ## ---------- 對外:短期歷史(與 v1 相同) ----------
 func load_history() -> Array:
@@ -58,6 +70,89 @@ func save_history(history: Array) -> void:
 
 func clear_history() -> void:
 	save_history([])
+	_history_summary = ""
+	_save_text(SUMMARY_PATH, "")
+
+## ---------- Context 摘要 ----------
+func get_history_summary() -> String:
+	return _history_summary
+
+func summary_section() -> String:
+	if _history_summary.strip_edges() == "":
+		return ""
+	return "\n\n# 更早的對話摘要(比目前上下文更舊,自然當作背景記憶)\n" \
+		+ _history_summary.strip_edges() + "\n"
+
+## 若 history 太長 → 摘要最舊那批,回傳新的(較短)history。呼叫者:chat_client.send() 前
+## 用便宜的 distill_model 壓,失敗 keep 原樣。async。
+func maybe_summarize_history(history: Array, api_key: String, model: String) -> Array:
+	if _summary_busy or api_key == "" or history.size() <= HISTORY_SUMMARIZE_THRESHOLD:
+		return history
+	var cut_at: int = history.size() - HISTORY_KEEP_VERBATIM
+	if cut_at <= 0:
+		return history
+	var old_part: Array = history.slice(0, cut_at)
+	var convo: String = ""
+	for m in old_part:
+		var role: String = String(m.get("role", ""))
+		if role == "user" and String(m.get("meta", "")) == "proactive":
+			continue
+		convo += "%s: %s\n" % ["主人" if role == "user" else "Doro",
+			String(m.get("content", "")).substr(0, 200)]
+	if convo.strip_edges() == "":
+		return history
+	_summary_busy = true
+	var new_chunk: String = await _llm_summarize_convo(convo, api_key, model)
+	_summary_busy = false
+	if new_chunk.strip_edges() == "":
+		return history
+	if _history_summary.strip_edges() == "":
+		_history_summary = new_chunk
+	else:
+		_history_summary += "\n" + new_chunk
+	if _history_summary.length() > SUMMARY_MAX_CHARS:
+		var condensed: String = await _llm_summarize_convo(
+			"以下是舊對話摘要片段,合併壓縮成更精簡版本(< 800 字):\n" + _history_summary,
+			api_key, model)
+		if condensed.strip_edges() != "":
+			_history_summary = condensed
+	_save_text(SUMMARY_PATH, _history_summary)
+	DoroLogger.log("history_summarized", {
+		"old_msgs": old_part.size(),
+		"kept_msgs": HISTORY_KEEP_VERBATIM,
+		"summary_chars": _history_summary.length()})
+	return history.slice(cut_at)
+
+const HIST_SUMMARY_PROMPT: String = """把下面對話濃縮成 3-5 句繁體中文摘要,
+保留:主人做過的重要事、決定、心情起伏、Doro 觀察到的主人狀態變化。
+省略:寒暄、問時間問天氣、單次玩笑。
+只輸出摘要正文,不要標題不要條列符號,句子短、要點明確。"""
+
+func _llm_summarize_convo(convo: String, api_key: String, model: String) -> String:
+	var body: Dictionary = {
+		"model": model,
+		"messages": [
+			{"role": "system", "content": HIST_SUMMARY_PROMPT},
+			{"role": "user", "content": convo},
+		],
+		"max_tokens": 500,
+		"temperature": 0.2,
+	}
+	var headers: PackedStringArray = [
+		"Authorization: Bearer " + api_key,
+		"Content-Type: application/json",
+		"HTTP-Referer: https://github.com/Oliver0804/DoroPet",
+		"X-Title: DoroPet",
+	]
+	if _summary_http.request(ENDPOINT, headers, HTTPClient.METHOD_POST, JSON.stringify(body)) != OK:
+		return ""
+	var result: Array = await _summary_http.request_completed
+	if int(result[0]) != HTTPRequest.RESULT_SUCCESS or int(result[1]) < 200 or int(result[1]) >= 300:
+		return ""
+	var parsed: Variant = JSON.parse_string((result[3] as PackedByteArray).get_string_from_utf8())
+	if typeof(parsed) != TYPE_DICTIONARY or not (parsed as Dictionary).has("choices"):
+		return ""
+	return String(parsed["choices"][0]["message"].get("content", "")).strip_edges()
 
 ## ---------- 對外:注入 context 的記憶段 ----------
 func get_memory() -> String:
@@ -194,7 +289,10 @@ speech(主人的口頭禪/常用詞/語尾癖,必須是重複出現多次的)
   不要當 speech 記,也不要基於它推 identity / preference / event
 - 與既有事實矛盾 → update 該編號;不再成立 → delete
 - 既有帳本已涵蓋 → 不要重複 add;沒有新東西就輸出 []
-- event 的 text 開頭帶日期(今天是 {date})
+- event 的 text 開頭帶時間戳(今天是 {date}):
+  * 需要精確時序的:「YYYY-MM-DD HH:MM 主人熬夜寫 code 到崩潰」
+  * 一般日期即可:「YYYY-MM-DD 主人生日」
+  * 依事件重要性判斷,別每件都記到分鐘
 - text 一律用繁體中文(台灣用字)
 - **text 不要以「主人」開頭**,主詞省略(整段已在「關於主人」下)
   例:記「喜歡吃布丁」不寫「主人喜歡吃布丁」;「明天要面試」不寫「主人明天要面試」
@@ -217,9 +315,10 @@ func _distill(history: Array, api_key: String, model: String) -> void:
 		convo += "%s: %s\n" % ["主人" if role == "user" else "Doro", String(m.get("content", ""))]
 	var user_msg: String = "【既有事實帳本】\n%s\n\n【新對話】\n%s" % [_ledger_text(), convo]
 	var dt: Dictionary = Time.get_datetime_dict_from_system()
-	var today: String = "%04d-%02d-%02d" % [dt.year, dt.month, dt.day]
+	var now_ref: String = "%04d-%02d-%02d %02d:%02d" % [
+		dt.year, dt.month, dt.day, dt.hour, dt.minute]
 	var ok: bool = await _llm_ops(api_key, model,
-		DISTILL_PROMPT.replace("{date}", today), user_msg)
+		DISTILL_PROMPT.replace("{date}", now_ref), user_msg)
 	_busy = false
 	if ok:
 		_since_distill = 0
@@ -285,6 +384,9 @@ func _llm_ops(api_key: String, model: String, system_prompt: String, user_msg: S
 func _apply_ops(ops: Array) -> void:
 	var dt: Dictionary = Time.get_datetime_dict_from_system()
 	var today: String = "%04d-%02d-%02d" % [dt.year, dt.month, dt.day]
+	## created/updated 用 datetime 時分秒:回顧記憶時能 sort by time,recall 更準
+	var now_iso: String = "%04d-%02d-%02d %02d:%02d:%02d" % [
+		dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second]
 	var applied: Dictionary = {"add": 0, "update": 0, "delete": 0, "followup": 0, "rejected": 0}
 	for o in ops:
 		if typeof(o) != TYPE_DICTIONARY:
@@ -317,7 +419,7 @@ func _apply_ops(ops: Array) -> void:
 				if not TYPE_LABELS.has(t):
 					t = "other"
 				_facts.append({"id": _next_id, "type": t, "text": text,
-					"created": today, "updated": today})
+					"created": now_iso, "updated": now_iso})
 				_next_id += 1
 				applied["add"] += 1
 			"update":
@@ -325,7 +427,7 @@ func _apply_ops(ops: Array) -> void:
 				for f in _facts:
 					if int(f.get("id", 0)) == uid:
 						f["text"] = String(o.get("text", f["text"]))
-						f["updated"] = today
+						f["updated"] = now_iso
 						applied["update"] += 1
 						break
 			"delete":
@@ -333,7 +435,7 @@ func _apply_ops(ops: Array) -> void:
 				for i in _facts.size():
 					if int(_facts[i].get("id", 0)) == did:
 						var f: Dictionary = _facts[i]
-						f["archived"] = today
+						f["archived"] = now_iso
 						f["reason"] = String(o.get("reason", ""))
 						_append_jsonl(ARCHIVE_PATH, f)
 						_facts.remove_at(i)

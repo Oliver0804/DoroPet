@@ -10,6 +10,7 @@ signal recording_started
 signal recording_stopped
 signal speaking_started
 signal speaking_finished
+signal barge_in_detected(spoken_chars: int)   ## 使用者插話時 emit,附上估算已播字元
 
 const DEFAULT_STT_ENDPOINT: String = "https://api.openai.com/v1/audio/transcriptions"
 const DEFAULT_STT_MODEL: String = "whisper-1"
@@ -64,6 +65,18 @@ var _last_spoken_text: String = ""       ## 最近一句正在講/剛講的話(�
 var _recent_spoken: Array = []           ## [{text: String, ts: int}]
 const RECENT_SPOKEN_KEEP: int = 8
 const ECHO_WINDOW_SEC: int = 15          ## TTS 講完 15 秒內收到的相似句都當回音丟
+## barge-in truncate:估算目前 TTS 已播到第幾字,讓 chat_client 把 history 尾巴 assistant 訊息截斷
+var _speak_start_ms: int = 0             ## Time.get_ticks_msec() 這句 speak 開始的時間
+var _speak_full_text_len: int = 0        ## 這句 speak 全文長度(中文字元計)
+const SPEAK_CHARS_PER_SEC: float = 5.0   ## 平均語速估算(中文 TTS)
+
+## 思考填充語:LLM 慢時 Doro 先「嗯~讓我想想」;首次用 TTS 真生成並存 cache,
+## 之後直接播 wav 零 API 成本
+const FILLER_DIR: String = "user://voice_filler/"
+const FILLER_PHRASES: PackedStringArray = [
+	"嗯嗯?", "唔...讓我想想喔", "欸,等一下下喔", "讓Doro想一下下~"]
+var _filler_capture_path: String = ""    ## 非空 = 下一個生成的 wav 要複製進 filler cache
+var _filler_player: AudioStreamPlayer    ## cached filler 用獨立 player,不觸發 speaking signals
 
 var _engine: String = "local"        ## "local" | "api" | "bailian" | "byteplus"
 var _api_key: String = ""
@@ -185,6 +198,13 @@ func _ready() -> void:
 	_bp.failed_first.connect(_on_vb_failed_first)
 	add_child(_bp)
 
+	## Filler 專用 player:cached wav 直接播不觸發 speaking_* signal,
+	## 免 pet.gd 誤走「真回覆播完」的 recording/bubble 邏輯造成 UI 閃爍
+	_filler_player = AudioStreamPlayer.new()
+	_filler_player.bus = "TTSBus"
+	_filler_player.volume_db = linear_to_db(maxf(_tts_volume, 0.001))
+	add_child(_filler_player)
+
 ## ---------- runtime 設定 ----------
 func set_engine(e: String) -> void:
 	if e in ["api", "local", "bailian", "byteplus"]:
@@ -268,8 +288,23 @@ func _on_stream_utterance(text: String) -> void:
 			"matched": matched.substr(0, 60)})
 		return
 	if is_speaking():
+		## Doro 講話中,判斷是否真的插話:
+		##   - 短於 4 字元 → 多半是背景音被 STT 誤辨識,不 barge
+		##   - 「嗯/哦/欸/好」等單字附和 → 不 barge(這是主人自然應答,不要中斷 Doro)
+		var stripped: String = text.strip_edges()
+		var is_short_noise: bool = stripped.length() < 4
+		var backchannels: PackedStringArray = ["嗯", "嗯嗯", "哦", "喔", "欸", "誒",
+			"好", "好的", "對", "对", "是", "是的", "哈", "哈哈", "哦哦"]
+		var is_backchannel: bool = backchannels.has(stripped)
+		if is_short_noise or is_backchannel:
+			DoroLogger.log("barge_ignored", {"text": stripped,
+				"reason": "backchannel" if is_backchannel else "short_noise"})
+			return
 		## 不是回音又在講話 → 主人真的插話
-		DoroLogger.log("barge_in_utter", {"text": text.substr(0, 60)})
+		var spoken_chars: int = get_spoken_chars_estimate()
+		DoroLogger.log("barge_in_utter", {"text": text.substr(0, 60),
+			"spoken_chars": spoken_chars})
+		barge_in_detected.emit(spoken_chars)   ## 讓 pet.gd truncate history
 		stop_speaking()
 		flush_recording_buffer()
 	DoroLogger.log("stt_response", {"engine": "byteplus_stream", "text": text,
@@ -358,6 +393,56 @@ func is_recording() -> bool: return _recording
 func flush_recording_buffer() -> void:
 	if _eff != null:
 		_eff.clear_buffer()
+
+## ---------- 思考填充語 ----------
+## LLM 還在想時播一句短語掩蓋延遲。回傳是否真的播了。
+func speak_filler() -> bool:
+	if not _tts_enabled or is_speaking():
+		return false
+	var idx: int = randi() % FILLER_PHRASES.size()
+	var phrase: String = FILLER_PHRASES[idx]
+	var cache_path: String = FILLER_DIR + "filler_%d.wav" % idx
+	if FileAccess.file_exists(cache_path):
+		## cache 命中:走獨立 _filler_player,不 emit speaking_* signals,
+		## 避免 pet.gd 觸發錄音/bubble 邏輯造成 UI 閃爍
+		var stream: AudioStreamWAV = _load_wav_as_stream(
+			ProjectSettings.globalize_path(cache_path))
+		if stream == null:
+			return false
+		_recent_spoken.append({"text": phrase, "ts": int(Time.get_unix_time_from_system())})
+		if _recent_spoken.size() > RECENT_SPOKEN_KEEP:
+			_recent_spoken = _recent_spoken.slice(_recent_spoken.size() - RECENT_SPOKEN_KEEP)
+		_filler_player.stream = stream
+		_filler_player.play()
+		DoroLogger.log("filler_play", {"idx": idx, "cached": true})
+		return true
+	## 沒 cache → 真 TTS 生成一次(只發生首輪),同時把 wav 捕捉進 cache
+	DoroLogger.log("filler_play", {"idx": idx, "cached": false})
+	speak(phrase)
+	_filler_capture_path = cache_path
+	return true
+
+## TTS 生成出 wav 時,若正等著捕捉 filler → 複製一份進 cache
+func _maybe_capture_filler(src_path: String) -> void:
+	if _filler_capture_path == "":
+		return
+	var dst: String = _filler_capture_path
+	_filler_capture_path = ""
+	DirAccess.make_dir_recursive_absolute(ProjectSettings.globalize_path(FILLER_DIR))
+	var abs_src: String = src_path
+	if src_path.begins_with("user://") or src_path.begins_with("res://"):
+		abs_src = ProjectSettings.globalize_path(src_path)
+	var err: int = DirAccess.copy_absolute(abs_src, ProjectSettings.globalize_path(dst))
+	DoroLogger.log("filler_cached", {"dst": dst, "err": err})
+
+## barge-in 用:估算「主人打斷時,Doro TTS 已播到第幾字」
+## 用平均語速 × 經過時間;不精確但夠 truncate history 用
+func get_spoken_chars_estimate() -> int:
+	if _speak_start_ms <= 0 or _speak_full_text_len <= 0:
+		return 0
+	var elapsed_sec: float = float(Time.get_ticks_msec() - _speak_start_ms) / 1000.0
+	var estimated: int = int(round(elapsed_sec * SPEAK_CHARS_PER_SEC))
+	return clamp(estimated, 0, _speak_full_text_len)
 
 ## ---------- 系統聲音輸入(loopback) ----------
 var _capture_system_audio: bool = false
@@ -749,6 +834,8 @@ func speak(text: String) -> void:
 	_recent_spoken.append({"text": text, "ts": int(Time.get_unix_time_from_system())})
 	if _recent_spoken.size() > RECENT_SPOKEN_KEEP:
 		_recent_spoken = _recent_spoken.slice(_recent_spoken.size() - RECENT_SPOKEN_KEEP)
+	_speak_start_ms = Time.get_ticks_msec()
+	_speak_full_text_len = text.length()
 	if _tts_backend != "system":
 		_vb_pending_text = text
 		_vb_generating = true
@@ -766,6 +853,7 @@ func _speak_system(text: String) -> void:
 
 ## ---------- Voicebox 佇列播放 ----------
 func _on_vb_chunk_ready(path: String, _idx: int) -> void:
+	_maybe_capture_filler(path)
 	_vb_queue.append(path)
 	if not _tts_player.playing:
 		_play_next_vb()
@@ -835,6 +923,7 @@ func _tts_thread(text: String, voice: String) -> void:
 	call_deferred("_play_tts_file", tmp)
 
 func _play_tts_file(path: String) -> void:
+	_maybe_capture_filler(path)
 	var stream: AudioStreamWAV = _load_wav_as_stream(path)
 	if stream == null:
 		speaking_finished.emit()
@@ -885,6 +974,8 @@ func get_tts_mouth_level() -> float:
 func is_speaking() -> bool:
 	if _tts_player != null and _tts_player.playing:
 		return true
+	if _filler_player != null and _filler_player.playing:
+		return true
 	return _vb_generating or not _vb_queue.is_empty()
 
 ## 播放預先生成的靜態 wav(idle 語音、按鈕音效等)。
@@ -903,6 +994,10 @@ func play_static_wav(path: String) -> bool:
 	return true
 
 func stop_speaking() -> void:
+	## filler 生成中被打斷 → 取消捕捉,免得把下一句真回覆誤存成 filler
+	_filler_capture_path = ""
+	if _filler_player != null and _filler_player.playing:
+		_filler_player.stop()
 	if _vb != null:
 		_vb.call("cancel")
 	if _bl != null:

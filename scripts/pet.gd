@@ -77,8 +77,9 @@ var _vad_silence_t: float = 0.0
 var _barge_t: float = 0.0                  ## 插話偵測:持續高音量的累積秒數
 var _tts_play_t: float = 0.0               ## TTS 已播放秒數(校準窗計時)
 var _echo_baseline: float = 0.0            ## 播放頭 1 秒量到的回音基線
-const BARGE_SUSTAIN: float = 0.3           ## 需持續這麼久才算真的在講話
+const BARGE_SUSTAIN: float = 0.8           ## 需持續這麼久才算真的在講話(不易被背景音誤觸)
 const ECHO_CALIB_SEC: float = 1.0          ## 回音校準窗:頭 1 秒只量不判
+const BARGE_GATE_MIN: float = 0.06         ## gate 最低值(vad_threshold × k 有時太低,環境嘈雜易誤觸)
 ## 反鋸齒(0=關, 1=2x, 2=4x, 3=8x;對應 Viewport.MSAA_*)
 var _msaa: int = 2
 ## 隨機自動表情
@@ -109,6 +110,7 @@ var _proactive_chat_max_sec: float = 1800.0     ## 上限 30 分鐘
 var _proactive_prompt: String = ""              ## 自訂搭話指令(留空用預設)
 var _proactive_with_screenshot: bool = false    ## 主動搭話時自動拍螢幕一起送
 var _proactive_timer: Timer
+var _reassert_top_timer: Timer
 var _last_proactive_ts: int = 0                 ## 上次主動搭話的 Unix 秒(冷卻)
 var _proactive_today_count: int = 0
 var _proactive_today_date: String = ""
@@ -157,6 +159,13 @@ var _pending_bubble_text: String = ""      ## TTS 生成中先壓著的回覆文
 var _last_sent_text: String = ""           ## 最近送出的 user 訊息(空頭支票重試用)
 var _last_sent_had_image: bool = false
 var _screen_retry_done: bool = false       ## 每輪只自動補圖重試一次
+## 串流輸出:第一句 sentence_stream 立刻 speak,後續句排 queue,TTS 播完 pop
+var _pending_tts_sentences: Array[String] = []
+var _stream_reply_accum: String = ""       ## 邊 stream 邊累積 bubble 顯示的完整回覆
+var _stream_active: bool = false           ## 是否有 stream 中的回覆
+## 填充語:送出後 1.2 秒還沒有回覆 → Doro 先「嗯~讓我想想」掩蓋延遲
+var _filler_timer: Timer
+const FILLER_DELAY_SEC: float = 1.2
 
 ## LLM 說「我這就看」卻沒呼叫工具的承諾句樣式
 const EMPTY_PROMISE_WORDS: PackedStringArray = [
@@ -196,10 +205,65 @@ func _ready() -> void:
 	_setup_tray()
 	_setup_proactive_chat()
 	_setup_idle_voice()
+	_setup_reassert_top()
 	## 延一秒等 voice_client 初始化完成再啟動常駐聽
 	if _always_listening:
 		await get_tree().create_timer(1.0).timeout
 		_apply_always_listening()
+
+## ---------- 主視窗置頂維持 ----------
+## macOS 已知問題:Window.always_on_top 有時被系統 reset(切 Space、fullscreen app 切換、
+## 副窗 create 順序等)。用 DisplayServer flag + 週期 timer 打底重設。
+func _setup_reassert_top() -> void:
+	if OS.get_name() == "macOS":
+		await _macos_force_apply_top_flag()
+	_reapply_always_on_top(true)
+	var wid: int = get_window().get_window_id()
+	DoroLogger.log("window_setup", {
+		"main_wid": wid,
+		"flag_top": DisplayServer.window_get_flag(DisplayServer.WINDOW_FLAG_ALWAYS_ON_TOP, wid),
+		"flag_borderless": DisplayServer.window_get_flag(DisplayServer.WINDOW_FLAG_BORDERLESS, wid),
+		"flag_transparent": DisplayServer.window_get_flag(DisplayServer.WINDOW_FLAG_TRANSPARENT, wid),
+	})
+	_reassert_top_timer = Timer.new()
+	_reassert_top_timer.wait_time = 1.0        ## 從 3s 縮短:切 app 後最多 1 秒 Doro 回最上
+	_reassert_top_timer.autostart = true
+	_reassert_top_timer.timeout.connect(_reapply_always_on_top)
+	add_child(_reassert_top_timer)
+
+## Godot 4.6 對 borderless+transparent 主視窗 WINDOW_FLAG_ALWAYS_ON_TOP 寫不進去。
+## Workaround:啟動時暫時關 borderless/transparent → 設 always_on_top → 再開回
+## 讓 macOS NSWindow.level 有機會被拉到 Floating。有一瞬 flicker 但只發生一次。
+func _macos_force_apply_top_flag() -> void:
+	var wid: int = get_window().get_window_id()
+	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_TRANSPARENT, false, wid)
+	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_BORDERLESS, false, wid)
+	await get_tree().process_frame
+	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_ALWAYS_ON_TOP, true, wid)
+	get_window().always_on_top = true
+	await get_tree().process_frame
+	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_BORDERLESS, true, wid)
+	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_TRANSPARENT, true, wid)
+	await get_tree().process_frame
+	DoroLogger.log("window_workaround_done", {
+		"flag_top_after": DisplayServer.window_get_flag(DisplayServer.WINDOW_FLAG_ALWAYS_ON_TOP, wid),
+	})
+
+func _reapply_always_on_top(force_raise: bool = false) -> void:
+	if not _always_on_top or _hidden:
+		return
+	var wid: int = get_window().get_window_id()
+	## 副窗 (subwindow) 的 always_on_top 有效,直接 set
+	if _input_window != null:
+		_input_window.always_on_top = true
+	if _bubble_window != null:
+		_bubble_window.always_on_top = true
+	get_window().always_on_top = true
+	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_ALWAYS_ON_TOP, true, wid)
+	## Godot 4.6 對主視窗 borderless+transparent 的 always_on_top flag 寫不進去,
+	## 用 move_to_foreground 硬拉 z-order。Godot macOS 底層是 orderFrontRegardless,
+	## raise 視窗但不 activate app、不搶輸入焦點。週期 timer 也跑這個維持位置。
+	DisplayServer.window_move_to_foreground(wid)
 
 ## ---------- 常駐聽(隨時 STT) ----------
 func _apply_always_listening() -> void:
@@ -427,6 +491,7 @@ func _setup_tray() -> void:
 	## tray 專用 PopupMenu
 	_tray_menu = PopupMenu.new()
 	_tray_menu.add_item("💬 跟 Doro 對話", 201)
+	_tray_menu.add_item("⬆ 拉回最上層", 205)
 	_tray_menu.add_item("顯示 / 隱藏 Doro", 200)
 	_tray_menu.add_separator()
 	_tray_menu.add_item("檢查更新 / 下載新版", 202)
@@ -471,6 +536,9 @@ func _on_tray_menu(id: int) -> void:
 		204:
 			_show_window_if_hidden()
 			_open_context_debug()
+		205:
+			_show_window_if_hidden()
+			_reapply_always_on_top(true)
 		299:
 			_cleanup_tray()
 			get_tree().quit()
@@ -693,6 +761,7 @@ func _build_menu() -> void:
 	_menu.add_item("重設大小", 22)
 	_menu.add_separator()
 	_menu.add_item("設定…", 40)
+	_menu.add_item("⬆ 拉回最上層", 44)
 	_menu.add_check_item("🎤 隨時聽(常駐 STT)", 43)
 	_menu.set_item_checked(_menu.get_item_index(43), _always_listening)
 	_menu.add_item("🔍 Debug 上下文", 42)
@@ -731,6 +800,8 @@ func _on_menu(id: int) -> void:
 			_open_context_debug()
 		43:
 			_toggle_always_listening()
+		44:
+			_reapply_always_on_top(true)
 		41:
 			if _update_url != "":
 				## 已知有新版 → 直接一鍵更新並重啟
@@ -793,11 +864,19 @@ func _process(dt: float) -> void:
 				_echo_baseline = maxf(_echo_baseline, rms)
 				_barge_t = 0.0
 			else:
-				var gate: float = maxf(_vad_threshold * 1.5, _echo_baseline * 1.6)
+				## gate 三選最大:VAD 門檻×2、回音基線×1.8、最低值 BARGE_GATE_MIN
+				var gate: float = maxf(maxf(_vad_threshold * 2.0,
+					_echo_baseline * 1.8), BARGE_GATE_MIN)
 				if rms > gate:
 					_barge_t += dt
 					if _barge_t >= BARGE_SUSTAIN:
 						DoroLogger.log("barge_in", {"gate": gate, "rms": rms})
+						## 打斷前先算已播字元,truncate history 對齊
+						var chars: int = int(_voice.call("get_spoken_chars_estimate"))
+						if _chat != null and chars > 0:
+							_chat.call("truncate_last_reply", chars)
+						_pending_tts_sentences.clear()   ## 拋掉還沒播的後續句
+						_stream_active = false
 						_voice.call("stop_speaking")   ## 主人插話 → Doro 閉嘴繼續聽
 						_voice.call("flush_recording_buffer")   ## 沖掉 buffer 裡 Doro 的殘響
 						_barge_t = 0.0
@@ -1063,6 +1142,7 @@ func _build_chat_ui() -> void:
 	_chat.connect("error_occurred", _on_chat_error)
 	_chat.connect("tool_started", _on_chat_tool_started)
 	_chat.connect("thinking_resumed", _on_chat_thinking_resumed)
+	_chat.connect("sentence_stream", _on_sentence_stream)
 
 	## 套用 config 中可能覆蓋 env 的設定
 	var cfg_key: String = _config_get("chat", "api_key", "")
@@ -1086,6 +1166,7 @@ func _build_chat_ui() -> void:
 	_voice.connect("recording_stopped", _on_recording_stopped)
 	_voice.connect("speaking_started", _on_tts_started)
 	_voice.connect("speaking_finished", _on_tts_finished)
+	_voice.connect("barge_in_detected", _on_barge_in_detected)
 
 	var v_engine: String = _config_get("voice", "engine", "local")
 	_voice.call("set_engine", v_engine)
@@ -1169,6 +1250,12 @@ func _build_chat_ui() -> void:
 	_input_idle_timer.timeout.connect(_close_input)
 	add_child(_input_idle_timer)
 
+	## 填充語 timer:回覆慢時 Doro 先出聲
+	_filler_timer = Timer.new()
+	_filler_timer.one_shot = true
+	_filler_timer.timeout.connect(_on_filler_timeout)
+	add_child(_filler_timer)
+
 func _open_input() -> void:
 	if not _chat.call("is_enabled"):
 		_show_bubble("(沒設 OPENROUTER_API_KEY 啦~)", 3.0)
@@ -1197,7 +1284,7 @@ func _close_input() -> void:
 func _make_floating_window(default_size: Vector2i) -> Window:
 	var w: Window = Window.new()
 	w.borderless = true
-	w.always_on_top = true
+	w.always_on_top = true        ## 副窗獨立置頂,不綁定主視窗
 	w.transparent = true
 	w.transparent_bg = true
 	w.unresizable = true
@@ -1310,6 +1397,7 @@ func _on_submit(text: String) -> void:
 	_last_sent_had_image = img != ""
 	_screen_retry_done = false
 	_chat.call("send", t, img)
+	_start_filler_timer()
 
 func _start_input_idle_timer() -> void:
 	if _input_idle_timer != null:
@@ -1335,6 +1423,14 @@ func _on_chat_reply(text: String, emotion: int) -> void:
 			_last_sent_had_image = true
 			_chat.call("send", _last_sent_text, img)
 			return
+	_cancel_filler_timer()
+	## Stream 模式下第一句已經 speak 過、bubble 已顯示、emotion 已 set
+	## reply_received 這裡拿到的是「完整版全文」,只做收尾(不再重啟 TTS)
+	if _stream_active:
+		_stream_reply_accum = text     ## 對齊 full text
+		if _bubble_window != null and _bubble_window.visible:
+			_bubble_label.text = text
+		return
 	_end_thinking()
 	_set_emotion(emotion)
 	## 若 TTS 啟用:文字先壓著,等第一段語音真的開始播才顯示(跟聲音同步;
@@ -1354,6 +1450,7 @@ func _on_chat_reply(text: String, emotion: int) -> void:
 
 ## 中止一切進行中的 LLM / TTS 工作。回傳是否真的有東西被停掉。
 func _abort_all() -> bool:
+	_cancel_filler_timer()
 	var did: bool = false
 	if _chat != null and bool(_chat.call("is_busy")):
 		_chat.call("abort")
@@ -1362,6 +1459,8 @@ func _abort_all() -> bool:
 		did = true
 	if _voice != null:
 		_voice.call("stop_speaking")   ## 停播放 + 取消 voicebox/百炼/BytePlus 生成
+	_pending_tts_sentences.clear()     ## 拋掉還沒播的後續句(stream 模式)
+	_stream_active = false
 	if _pending_bubble_text != "":
 		_pending_bubble_text = ""      ## 壓著等語音的文字直接丟棄
 		did = true
@@ -1393,6 +1492,12 @@ func _reveal_pending_bubble(seconds: float) -> void:
 	_pending_bubble_text = ""
 
 func _on_tts_finished() -> void:
+	## 串流模式:queue 內還有下一句 → pop 出來 speak,繼續 pipeline
+	if not _pending_tts_sentences.is_empty() and _voice != null and _voice.call("is_tts_enabled"):
+		var next_sentence: String = _pending_tts_sentences.pop_front()
+		_voice.call("speak", next_sentence)
+		return
+	_stream_active = false
 	## TTS 沒真的播出來(生成失敗/平台不支援)→ 這裡保底把字亮出來
 	_reveal_pending_bubble(_bubble_seconds)
 	## TTS 念完後 bubble 再停留 user 設的秒數
@@ -1480,6 +1585,7 @@ static func hotkey_to_string(keycode: int, mods: int) -> String:
 	return "+".join(parts)
 
 func _on_chat_error(reason: String) -> void:
+	_cancel_filler_timer()
 	_end_thinking()
 	_show_bubble("(嗚… %s)" % reason, 4.0)
 
@@ -1560,7 +1666,84 @@ func _on_recording_stopped() -> void:
 	_bubble_window.hide()
 	_bubble_timer.stop()
 
+func _on_barge_in_detected(spoken_chars: int) -> void:
+	if _chat != null and spoken_chars > 0:
+		_chat.call("truncate_last_reply", spoken_chars)
+	## 主人插話 → 拋掉還沒播的後續句
+	_pending_tts_sentences.clear()
+	_stream_active = false
+
+## 送出訊息後起 1.2s 倒數;還沒回覆就播填充語
+func _start_filler_timer() -> void:
+	if _filler_timer != null:
+		_filler_timer.stop()
+		_filler_timer.start(FILLER_DELAY_SEC)
+
+func _cancel_filler_timer() -> void:
+	if _filler_timer != null:
+		_filler_timer.stop()
+
+func _on_filler_timeout() -> void:
+	## 還在等 LLM 且 Doro 沒在講話 → 出個聲
+	if _thinking and _voice != null:
+		_voice.call("speak_filler")
+
+## Stream:LLM 邊生成邊 emit 一句一句。第一句立刻 speak(降 latency),後續 queue
+func _on_sentence_stream(sentence: String, is_first: bool, emotion: int) -> void:
+	if is_first:
+		_cancel_filler_timer()
+		_stream_reply_accum = sentence
+		_stream_active = true
+		_end_thinking()
+		if emotion > 0:
+			_set_emotion(emotion)
+		## bubble 用逐句累積顯示
+		if _voice and _voice.call("is_tts_enabled"):
+			_pending_bubble_text = ""     ## 不再用 pending,直接顯示
+			_show_bubble(sentence, 999.0)
+			_voice.call("speak", sentence)
+		else:
+			_show_bubble(sentence, _bubble_seconds)
+	else:
+		_stream_reply_accum += sentence
+		if _bubble_window != null and _bubble_window.visible:
+			_bubble_label.text = _stream_reply_accum
+		_pending_tts_sentences.append(sentence)
+
+## 語音關 STT 指令關鍵字:偵測到就直接關常駐聽 + 停 TTS,不送 LLM
+const STOP_LISTEN_KEYWORDS: PackedStringArray = [
+	"閉嘴", "闭嘴", "安靜", "安静", "不要講話", "不要说话", "不要說話",
+	"別說話", "别说话", "別講話", "别讲话", "住嘴", "住口",
+	"停下來", "停下来", "停止聽", "停止听",
+]
+func _is_stop_listen_command(text: String) -> bool:
+	var t: String = text.strip_edges()
+	if t.length() > 12:
+		return false      ## 太長不像單獨的命令句
+	for kw in STOP_LISTEN_KEYWORDS:
+		if t.contains(kw):
+			return true
+	return false
+
 func _on_voice_transcribed(text: String) -> void:
+	## 語音指令:「閉嘴」「別說話」→ 關 STT + 停 TTS,不送 LLM
+	if _is_stop_listen_command(text):
+		DoroLogger.log("voice_stop_command", {"text": text})
+		if _voice != null:
+			_voice.call("stop_speaking")
+		_pending_tts_sentences.clear()
+		_stream_active = false
+		_cancel_filler_timer()
+		if _chat != null and bool(_chat.call("is_busy")):
+			_chat.call("abort")
+		_end_thinking()
+		_show_bubble("(Doro 安靜~)", 3.0)
+		if _always_listening:
+			_always_listening = false
+			_menu.set_item_checked(_menu.get_item_index(43), false)
+			_save_config()
+			_apply_always_listening()
+		return
 	## STT 完成 → 檢查截圖關鍵字(跟打字路徑一致)再送
 	_last_input_voice = true
 	if not _thinking:
@@ -1576,6 +1759,7 @@ func _on_voice_transcribed(text: String) -> void:
 	_last_sent_had_image = img != ""
 	_screen_retry_done = false
 	_chat.call("send", text, img)
+	_start_filler_timer()
 	if _input_box != null and _input_window.visible:
 		_input_box.text = ""
 		## 連續對話模式:不起 idle timer,等 TTS 結束 _on_tts_finished 會自動再開錄音
@@ -1600,6 +1784,9 @@ func _on_voice_error(reason: String) -> void:
 	_show_bubble("(嗚… %s)" % reason, 3.0)
 
 func _show_bubble(text: String, seconds: float) -> void:
+	## recording UI 有自己的固定尺寸(兩行文字),別走 _show_bubble 路徑覆蓋 label
+	if _recording_ui:
+		return
 	_bubble_label.text = text
 	_bubble_window.show()
 	_bubble_timer.stop()
@@ -1607,9 +1794,14 @@ func _show_bubble(text: String, seconds: float) -> void:
 	_reposition_bubble()
 	## 等 layout 算完再依照新的尺寸定位
 	await get_tree().process_frame
+	## await 期間可能剛好切成 recording UI(常駐聽 case),就不 resize 免壓縮成單行
+	if _recording_ui:
+		return
 	var min_sz: Vector2 = _bubble.get_combined_minimum_size()
 	_bubble_window.size = Vector2i(int(ceil(min_sz.x)), int(ceil(min_sz.y)))
 	_reposition_bubble()
+	## bubble 秀完把主視窗硬拉到最上(force_raise=true 才 move_to_foreground)
+	_reapply_always_on_top(true)
 
 func _reposition_bubble() -> void:
 	if _bubble_window == null or not _bubble_window.visible:

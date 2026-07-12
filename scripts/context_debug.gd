@@ -25,6 +25,7 @@ var _live_filter: LineEdit
 var _live_auto_scroll: CheckBox
 var _live_paused: CheckBox
 var _live_count_label: Label
+var _stats_label: Label
 var _live_timer: Timer
 var _log_path: String = ""
 var _log_offset: int = 0
@@ -132,6 +133,12 @@ func _refresh_brain() -> void:
 		out += _indent(String(mood.call("prompt_line")), "    ") + "\n\n"
 	var mem: Node = _chat.get_node_or_null("MemoryStore")
 	if mem != null:
+		var summary: String = String(mem.call("get_history_summary"))
+		out += "─── 📝 更早對話摘要 ──────────────\n"
+		if summary.strip_edges() == "":
+			out += "  (空 — history 還沒超過摘要門檻)\n\n"
+		else:
+			out += _indent(summary, "  ") + "\n\n"
 		var facts_text: String = String(mem.call("get_memory"))
 		out += "─── 📚 事實帳本(長期記憶) ────────\n"
 		if facts_text.strip_edges() == "":
@@ -188,6 +195,14 @@ func _build_live_tab() -> void:
 	_live_count_label.modulate = Color(0.7, 0.7, 0.7)
 	bar.add_child(_live_count_label)
 	v.add_child(bar)
+
+	## Stats bar:即時 API 呼叫次數與 token 估算
+	_stats_label = Label.new()
+	_stats_label.text = "📊 尚無 API 呼叫"
+	_stats_label.add_theme_font_size_override("font_size", 12)
+	_stats_label.modulate = Color(0.85, 0.9, 1.0)
+	_stats_label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	v.add_child(_stats_label)
 
 	## Splitter: 上事件列表 / 下 detail
 	var split: VSplitContainer = VSplitContainer.new()
@@ -313,10 +328,107 @@ func _rebuild_live_tree() -> void:
 		it.set_metadata(0, e)
 		shown += 1
 	_live_count_label.text = "%d / %d 事件" % [shown, total]
+	_update_stats_bar()
 	if _live_auto_scroll != null and _live_auto_scroll.button_pressed and shown > 0:
 		var last: TreeItem = root.get_child(root.get_child_count() - 1)
 		if last != null:
 			_live_tree.scroll_to_item(last)
+
+## 掃 _events 累計各 API 呼叫次數與 token/字元估算
+func _update_stats_bar() -> void:
+	var llm_calls: int = 0
+	var llm_stream_calls: int = 0
+	var llm_in_chars: int = 0
+	var llm_out_chars: int = 0
+	var tool_calls: int = 0
+	var summarize_calls: int = 0
+	var distill_calls: int = 0
+	var tts_chars: int = 0
+	var tts_calls: int = 0
+	var stt_utter: int = 0
+	var echo_dropped: int = 0
+	var barge_in: int = 0
+	## STT session 秒數估算:配對 up=true / up=false
+	var session_up_ts: int = 0
+	var session_total_sec: int = 0
+	for e in _events:
+		var t: String = String(e.get("type", ""))
+		match t:
+			"chat_request":
+				llm_calls += 1
+			"chat_prompt":
+				llm_in_chars += String(e.get("system_prompt", "")).length()
+			"chat_response":
+				llm_out_chars += String(e.get("text", "")).length()
+				if bool(e.get("stream", false)):
+					llm_stream_calls += 1
+			"tool_call":
+				tool_calls += 1
+			"history_summarized":
+				summarize_calls += 1
+			"memory_distilled", "memory_consolidated":
+				distill_calls += 1
+			"tts_bp_start", "tts_vb_start", "tts_bl_start":
+				tts_calls += 1
+			"stt_response":
+				stt_utter += 1
+			"stt_echo_dropped":
+				echo_dropped += 1
+			"barge_in_utter", "barge_in":
+				barge_in += 1
+			"stt_session":
+				var up: bool = bool(e.get("up", false))
+				var ts: int = _parse_ts_to_epoch(String(e.get("ts", "")))
+				if up:
+					session_up_ts = ts
+				elif session_up_ts > 0 and ts > session_up_ts:
+					session_total_sec += ts - session_up_ts
+					session_up_ts = 0
+	## 若 session 還 up 中,加上「到現在」的秒數
+	if session_up_ts > 0:
+		var now_ep: int = int(Time.get_unix_time_from_system())
+		if now_ep > session_up_ts:
+			session_total_sec += now_ep - session_up_ts
+
+	## TTS 字元 = 所有 chat_response 的 text 長度(TTS 幾乎必然講整段)
+	tts_chars = llm_out_chars
+
+	## Tokens 估算:中文約 3 字元/token(粗估;英文 4 字元/token)
+	var in_tok: int = int(round(float(llm_in_chars) / 3.0))
+	var out_tok: int = int(round(float(llm_out_chars) / 3.0))
+
+	var line1: String = "📊 LLM %d 次(串流 %d)  ·  in ≈ %s tok  ·  out ≈ %s tok  ·  tools %d" % [
+		llm_calls, llm_stream_calls, _fmt_num(in_tok), _fmt_num(out_tok), tool_calls]
+	var line2: String = "🎙 STT utter %d · echo 攔 %d · barge %d · session ≈ %s   |  🔊 TTS %d 次 ≈ %s 字" % [
+		stt_utter, echo_dropped, barge_in, _fmt_duration(session_total_sec),
+		tts_calls, _fmt_num(tts_chars)]
+	var line3: String = "🧠 蒸餾 %d · 摘要 %d" % [distill_calls, summarize_calls]
+	_stats_label.text = line1 + "\n" + line2 + "\n" + line3
+
+func _parse_ts_to_epoch(ts: String) -> int:
+	## ts 格式 "YYYY-MM-DDTHH:MM:SS"
+	if ts.length() < 19:
+		return 0
+	var d: Dictionary = {
+		"year": int(ts.substr(0, 4)), "month": int(ts.substr(5, 2)),
+		"day": int(ts.substr(8, 2)), "hour": int(ts.substr(11, 2)),
+		"minute": int(ts.substr(14, 2)), "second": int(ts.substr(17, 2)),
+	}
+	return int(Time.get_unix_time_from_datetime_dict(d))
+
+func _fmt_num(n: int) -> String:
+	if n >= 1_000_000:
+		return "%.2fM" % (float(n) / 1_000_000.0)
+	if n >= 1000:
+		return "%.1fk" % (float(n) / 1000.0)
+	return str(n)
+
+func _fmt_duration(sec: int) -> String:
+	if sec < 60:
+		return "%ds" % sec
+	if sec < 3600:
+		return "%dm%02ds" % [sec / 60, sec % 60]
+	return "%dh%02dm" % [sec / 3600, (sec % 3600) / 60]
 
 func _on_live_selected() -> void:
 	var sel: TreeItem = _live_tree.get_selected()
