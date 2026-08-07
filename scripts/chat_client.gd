@@ -1237,6 +1237,11 @@ func _execute_tool(name: String, args: Dictionary) -> String:
 			return _tool_take_screenshot()
 		"recall_memory":
 			return String(_mem.call("recall", String(args.get("keyword", ""))))
+		"recall_person":
+			if _people == null:
+				return "(還沒有人物記憶)"
+			return String(_people.call("recall",
+				String(args.get("who", "")), String(args.get("keyword", ""))))
 		"web_search":
 			return await _tool_web_search(String(args.get("query", "")))
 	return "(未知工具: %s)" % name

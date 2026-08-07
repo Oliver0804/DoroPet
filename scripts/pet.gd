@@ -1895,13 +1895,18 @@ func _leave_discord_mode() -> void:
 ## 帶說話者名字進去,不然多人頻道裡 Doro 分不出誰是誰
 func _on_discord_speech(text: String, user_name: String, user_id: String) -> void:
 	if _people != null and user_id != "":
+		## 先查資料庫再回話:每一句都重新撈這個人的紀錄注入 context,
+		## 不是只在換人時撈 —— 同一個人連續講話,他上一句也是新的記憶,
+		## 而且 Doro 該持續意識到「我在跟誰講話、跟他聊過什麼」
+		var seen_before: int = int(_people.call("count_for", user_id))
 		_people.call("record", user_id, user_name, text, "user")
-		## 換人講話就換一份「印象」進 context —— 這樣 Doro 認得對方是誰、
-		## 上次聊過什麼,不用每次都靠 recall_person 主動查
-		if _chat != null and user_id != _last_discord_uid:
-			_last_discord_uid = user_id
+		_last_discord_uid = user_id
+		if _chat != null:
 			var note: String = _discord_context_note(_discord.call("get_invoker"))
-			note += String(_people.call("recent_brief", user_id))
+			if seen_before == 0:
+				note += "\n\n# 「%s」是第一次遇到的人\n你沒有他的任何紀錄。別裝熟,也別亂編你們以前的事。" % user_name
+			else:
+				note += String(_people.call("recent_brief", user_id, 8))
 			_chat.call("set_context_note", note)
 	_on_voice_transcribed("%s:%s" % [user_name, text])
 
