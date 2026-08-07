@@ -469,6 +469,11 @@ func _on_idle_voice_timer() -> void:
 	## 忙碌狀態就跳過本輪
 	if not _idle_voice_enabled or _idle_voice_manifest.is_empty():
 		return
+	## Discord 模式:桌面端完全靜音。隨機念話是桌寵陪伴用的自言自語,
+	## 進頻道會很吵,留在本地又違反「桌面不出聲」→ 直接跳過這一輪
+	if _voice != null and bool(_voice.call("is_tts_sink_external")):
+		_schedule_idle_voice()
+		return
 	var busy: bool = _thinking \
 		or (_input_window != null and _input_window.visible) \
 		or (_bubble_window != null and _bubble_window.visible) \

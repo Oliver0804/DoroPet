@@ -453,6 +453,12 @@ func speak_filler() -> bool:
 		_recent_spoken.append({"text": phrase, "ts": int(Time.get_unix_time_from_system())})
 		if _recent_spoken.size() > RECENT_SPOKEN_KEEP:
 			_recent_spoken = _recent_spoken.slice(_recent_spoken.size() - RECENT_SPOKEN_KEEP)
+		if _tts_sink_external:
+			## Discord 模式:filler 也要進頻道而不是從桌面喇叭出來。
+			## 走 sink 就不會有本地回音問題,所以也不用開回音窗
+			_emit_wav_to_sink(cache_path)
+			DoroLogger.log("filler_play", {"idx": idx, "cached": true, "sink": "discord"})
+			return true
 		_filler_player.stream = stream
 		_filler_player.play()
 		_open_filler_echo_window(stream.get_length())
@@ -1078,6 +1084,10 @@ func is_speaking() -> bool:
 ## 播放預先生成的靜態 wav(idle 語音、按鈕音效等)。
 ## 忙碌中就跳過並回 false;成功會發 speaking_started,播完發 speaking_finished。
 func play_static_wav(path: String) -> bool:
+	## Discord 模式:桌面端完全不出聲。靜態 wav(隨機念話等)是桌寵陪伴用的,
+	## 送進頻道只會吵人,所以直接不播
+	if _tts_sink_external:
+		return false
 	if is_speaking():
 		return false
 	if _tts_player == null:
