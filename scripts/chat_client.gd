@@ -326,6 +326,25 @@ func get_persona() -> String:
 func set_people_store(p: Node) -> void:
 	_people = p
 
+## 截圖看的是主人的螢幕。Discord 頻道裡念出來等於把主人的畫面內容
+## 播給頻道上所有人聽 —— 所以進頻道就整個關掉,連工具清單都不給 LLM 看到
+var _screenshot_allowed: bool = true
+func set_screenshot_allowed(on: bool) -> void:
+	_screenshot_allowed = on
+func is_screenshot_allowed() -> bool:
+	return _screenshot_allowed
+
+## 依當前狀態過濾工具清單:不給看就不會被呼叫,比事後拒絕乾淨
+func _tools_for_request() -> Array:
+	if _screenshot_allowed:
+		return TOOLS_SCHEMA
+	var out: Array = []
+	for t in TOOLS_SCHEMA:
+		if String((t as Dictionary).get("function", {}).get("name", "")) == "take_screenshot":
+			continue
+		out.append(t)
+	return out
+
 func set_context_note(s: String) -> void:
 	_context_note = ("\n\n" + s.strip_edges()) if s.strip_edges() != "" else ""
 
@@ -679,7 +698,7 @@ func _send_round() -> void:
 		"messages": _running_messages,
 		"max_tokens": 800,
 		"temperature": 0.8,
-		"tools": TOOLS_SCHEMA,
+		"tools": _tools_for_request(),
 		"tool_choice": "auto",
 		## 關閉 reasoning:seed-2.0-mini 等思考型模型會先吐幾千字元 reasoning
 		## 才開始回答(實測 13.4s→1.2s,10 倍差)。桌寵短回覆不需要深思。
@@ -1234,6 +1253,8 @@ func _execute_tool(name: String, args: Dictionary) -> String:
 			var city: String = String(args.get("city", "Taipei"))
 			return await _tool_get_weather(city)
 		"take_screenshot":
+			if not _screenshot_allowed:
+				return "(現在在 Discord 語音頻道,不能看主人的螢幕 —— 那是他的隱私,頻道裡還有別人)"
 			return _tool_take_screenshot()
 		"recall_memory":
 			return String(_mem.call("recall", String(args.get("keyword", ""))))

@@ -378,8 +378,11 @@ func _fire_proactive(extra_hint: String) -> void:
 			p += "\n(當下情境:%s)" % ctx_hint
 	var img: String = ""
 	if _proactive_with_screenshot and _vision_enabled:
-		_show_bubble("📸 Doro 偷看一眼螢幕…", 999.0)
-		img = _grab_screenshot_b64()
+		if _chat != null and not bool(_chat.call("is_screenshot_allowed")):
+			DoroLogger.log("screenshot_blocked", {"reason": "discord mode", "by": "proactive"})
+		else:
+			_show_bubble("📸 Doro 偷看一眼螢幕…", 999.0)
+			img = _grab_screenshot_b64()
 		if img != "":
 			p += "\n(附上剛拍的螢幕截圖,可基於畫面內容主動搭話)"
 	_show_bubble("💭 Doro 想說話…", 999.0)
@@ -1795,7 +1798,10 @@ func _on_voice_transcribed(text: String) -> void:
 	_show_bubble("「%s」" % text, 2.0)
 	await get_tree().create_timer(0.3).timeout
 	var img: String = ""
-	if _wants_screenshot(text):
+	if _wants_screenshot(text) and _chat != null and not bool(_chat.call("is_screenshot_allowed")):
+		_show_bubble("(在 Discord 裡不看螢幕喔)", 2.5)
+		DoroLogger.log("screenshot_blocked", {"reason": "discord mode", "text": text.substr(0, 40)})
+	elif _wants_screenshot(text):
 		_show_bubble("📸 Doro 在看畫面…", 999.0)
 		img = _grab_screenshot_b64()
 	_show_bubble("💭 Doro 正在想…", 999.0)
@@ -1879,7 +1885,10 @@ func _enter_discord_mode(invoker_name: String = "") -> void:
 		_menu.set_item_checked(_menu.get_item_index(43), false)
 		_apply_always_listening()
 	_voice.call("set_tts_sink_external", true)
-	DoroLogger.log("discord_mode", {"on": true, "was_always_listening": _discord_prev_always_listen})
+	if _chat != null:
+		_chat.call("set_screenshot_allowed", false)   ## 主人的螢幕不能播給頻道聽
+	DoroLogger.log("discord_mode", {"on": true,
+		"was_always_listening": _discord_prev_always_listen, "screenshot": false})
 	_show_bubble("🎧 Doro 進語音頻道了", 3.0)
 
 func _leave_discord_mode() -> void:
@@ -1889,6 +1898,8 @@ func _leave_discord_mode() -> void:
 	if _voice == null or not bool(_voice.call("is_tts_sink_external")):
 		return
 	_voice.call("set_tts_sink_external", false)
+	if _chat != null:
+		_chat.call("set_screenshot_allowed", true)
 	if _discord_prev_always_listen and not _always_listening:
 		_always_listening = true
 		_menu.set_item_checked(_menu.get_item_index(43), true)
