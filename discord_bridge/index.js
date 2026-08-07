@@ -171,7 +171,6 @@ async function joinChannel(guildId, channelId, adapterCreator) {
 
 client.once(Events.ClientReady, async (c) => {
 	log(`bot 上線:${c.user.tag}`);
-	log(`WebSocket 等 Godot 連線:ws://127.0.0.1:${WS_PORT}`);
 	if (DEBUG_DUMP) log('DEBUG 模式:收到的每句話會存進 debug/');
 	// Guild 層級註冊指令(全域註冊要等最多 1 小時才生效)
 	const cmds = [
@@ -233,17 +232,43 @@ client.on(Events.VoiceStateUpdate, async (oldS, newS) => {
 	}
 });
 
+// ---------- 登入 ----------
+// token 可能來自環境變數,也可能是 Godot 從設定視窗送過來的。
+// sidecar 是獨立進程讀不到 Godot 的設定檔,所以走 WS 傳。
+let loggedIn = false;
+let loggingIn = false;
+
+async function doLogin(token) {
+	if (loggedIn) return { ok: true, bot: client.user?.tag || '' };
+	if (loggingIn) return { ok: false, error: '正在登入中' };
+	loggingIn = true;
+	try {
+		await client.login(token);
+		loggedIn = true;
+		return { ok: true, bot: client.user?.tag || '' };
+	} catch (e) {
+		return { ok: false, error: e.message };
+	} finally {
+		loggingIn = false;
+	}
+}
+
 // ---------- WebSocket(給 Godot) ----------
 const wss = new WebSocketServer({ host: '127.0.0.1', port: WS_PORT });
 wss.on('connection', (ws) => {
 	if (bridge && bridge.readyState === 1) bridge.close();
 	bridge = ws;
 	log('Godot 已連線');
-	ws.send(JSON.stringify({ type: 'ready' }));
+	ws.send(JSON.stringify({ type: 'ready', logged_in: loggedIn }));
 	ws.on('message', (raw) => {
 		let msg;
 		try { msg = JSON.parse(raw.toString()); } catch { return; }
-		if (msg.type === 'speak' && msg.wav_b64) {
+		if (msg.type === 'login' && msg.token) {
+			doLogin(msg.token).then((r) => {
+				log(r.ok ? `登入成功:${r.bot}` : `登入失敗:${r.error}`);
+				ws.send(JSON.stringify({ type: 'login_result', ...r }));
+			});
+		} else if (msg.type === 'speak' && msg.wav_b64) {
 			playQueue.push(Buffer.from(msg.wav_b64, 'base64'));
 			drainQueue();
 		} else if (msg.type === 'stop') {
@@ -259,16 +284,14 @@ wss.on('connection', (ws) => {
 });
 
 // ---------- 啟動 ----------
-if (!TOKEN) {
-	console.error('缺 DISCORD_BOT_TOKEN。放進 ~/.doropet.env:');
-	console.error("  echo 'export DISCORD_BOT_TOKEN=xxx' >> ~/.doropet.env");
-	process.exit(1);
-}
 log(generateDependencyReport());
-client.login(TOKEN).catch((e) => {
-	console.error('登入失敗:', e.message);
-	process.exit(1);
-});
+log(`WebSocket 等 Doro 連線:ws://127.0.0.1:${WS_PORT}`);
+if (TOKEN) {
+	doLogin(TOKEN).catch(() => {});
+} else {
+	// 沒有環境變數也照跑:token 可以從 Doro 的設定視窗填,連上後由 Godot 送過來
+	log('沒有 DISCORD_BOT_TOKEN,等 Doro 送 token 過來(設定 → Discord 語音 → Bot Token)');
+}
 
 for (const sig of ['SIGINT', 'SIGTERM']) {
 	process.on(sig, () => {

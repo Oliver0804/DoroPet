@@ -5,7 +5,7 @@
 # 分開跑是刻意的——讓 Godot spawn node 會留孤兒進程,而且看不到 sidecar 的 log。
 #
 # 需要的環境變數(放 ~/.doropet.env):
-#   DISCORD_BOT_TOKEN=xxx
+#   DISCORD_BOT_TOKEN=xxx   (選用 —— 也可以改從 Doro 設定視窗填)
 #
 # Bot 怎麼建:
 #   1. https://discord.com/developers/applications → New Application
@@ -25,10 +25,11 @@ BRIDGE_DIR="$PROJ_ROOT/discord_bridge"
 
 [[ -f "$HOME/.doropet.env" ]] && source "$HOME/.doropet.env"
 
+# token 兩種來源:這裡的環境變數,或 Doro 設定視窗(連上後由 Godot 送過來)。
+# 兩個都沒有的話 sidecar 照樣起來等,只是還不能進頻道。
 if [[ -z "${DISCORD_BOT_TOKEN:-}" ]]; then
-  echo "❌ 沒設 DISCORD_BOT_TOKEN" >&2
-  echo "   echo 'export DISCORD_BOT_TOKEN=你的token' >> ~/.doropet.env" >&2
-  exit 1
+  echo "ℹ️  沒設 DISCORD_BOT_TOKEN —— 改從 Doro 設定視窗填(設定 → 🎧 Discord 語音 → Bot Token)"
+  echo "   要用環境變數的話:echo 'export DISCORD_BOT_TOKEN=你的token' >> ~/.doropet.env"
 fi
 
 if ! command -v node >/dev/null 2>&1; then
@@ -47,7 +48,7 @@ if [[ ! -d "$BRIDGE_DIR/node_modules" ]]; then
   (cd "$BRIDGE_DIR" && npm install)
 fi
 
-export DISCORD_BOT_TOKEN
+export DISCORD_BOT_TOKEN="${DISCORD_BOT_TOKEN:-}"
 export DORO_BRIDGE_PORT="${DORO_BRIDGE_PORT:-8765}"
 if [[ "${1:-}" == "--debug" ]]; then
   export DORO_BRIDGE_DEBUG=1

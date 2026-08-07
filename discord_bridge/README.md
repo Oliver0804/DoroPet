@@ -39,9 +39,15 @@ Discord 不會把 bot 自己的聲音回傳給它,本地那套 filler 回音防�
 
 ### 2. 放 token
 
-```bash
-echo 'export DISCORD_BOT_TOKEN=你的token' >> ~/.doropet.env
-```
+兩種方式,擇一:
+
+- **Doro 設定視窗**(建議):設定 → 🎧 Discord 語音 → Bot Token。
+  sidecar 是獨立進程讀不到 Godot 的設定檔,所以 Doro 連上之後會把 token 送過去讓它登入。
+- **環境變數**:`echo 'export DISCORD_BOT_TOKEN=你的token' >> ~/.doropet.env`
+
+兩個都沒填的話 sidecar 照樣會啟動等著,只是還不能進頻道。
+
+⚠️ 從設定視窗填的話 token 會明文存在 `doropet.cfg`(跟其他金鑰一樣)。外洩等於 bot 被接管。
 
 ### 3. 跑起來
 

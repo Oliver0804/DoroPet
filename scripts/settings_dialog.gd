@@ -96,6 +96,8 @@ var _stt_cloud_rows: Array[Control] = []
 var _stt_bp_rows: Array[Control] = []
 var _stt_bpws_rows: Array[Control] = []
 var _stt_bp_key: LineEdit
+var _dc_token: LineEdit
+var _dc_url: LineEdit
 var _stt_hotwords: LineEdit
 const STT_ENGINES: Array = ["local", "api", "bailian", "byteplus"]
 
@@ -164,6 +166,8 @@ func open(initial: Dictionary, chat_status: String, voice_status: String = "") -
 	_voice_engine.select(maxi(0, STT_ENGINES.find(eng)))
 	_stt_bp_key.text = String(initial.get("bp_asr_key", ""))
 	_stt_hotwords.text = String(initial.get("stt_hotwords", ""))
+	_dc_token.text = String(initial.get("discord_token", ""))
+	_dc_url.text = String(initial.get("discord_url", ""))
 	_update_stt_visibility()
 	_tts_enabled.button_pressed = initial.get("tts_enabled", true)
 	_tts_volume_slider.value = float(initial.get("tts_volume", 1.0))
@@ -916,6 +920,48 @@ func _build_ui() -> void:
 	add_child(_vb_http)
 	_update_tts_visibility()
 
+	## --- Discord 語音頻道 ---
+	vb.add_child(HSeparator.new())
+	vb.add_child(_section("🎧 Discord 語音"))
+	var dc_hint: Label = Label.new()
+	dc_hint.text = "讓 Doro 進 Discord 語音頻道跟人講話。需要先跑 scripts_sh/04_discord.sh 啟動橋接程式,\n再從右鍵選單勾「🎧 Discord 語音」,最後在頻道裡打 /doro join。"
+	dc_hint.add_theme_font_size_override("font_size", 11)
+	dc_hint.modulate = Color(1, 1, 1, 0.6)
+	vb.add_child(dc_hint)
+
+	var dct_row: HBoxContainer = HBoxContainer.new()
+	var dct_cap: Label = Label.new()
+	dct_cap.text = "Bot Token"
+	dct_cap.custom_minimum_size = Vector2(90, 0)
+	dct_cap.tooltip_text = "Discord Developer Portal → 你的 Application → Bot → Reset Token"
+	_dc_token = LineEdit.new()
+	_dc_token.secret = true
+	_dc_token.placeholder_text = "貼上 bot token(留空則讀環境變數 DISCORD_BOT_TOKEN)"
+	_dc_token.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_dc_token.text_changed.connect(_on_text_changed)
+	dct_row.add_child(dct_cap)
+	dct_row.add_child(_dc_token)
+	vb.add_child(dct_row)
+
+	var dcw_label: Label = Label.new()
+	dcw_label.text = "⚠️ token 會明文存在設定檔裡(跟其他金鑰一樣)。外洩等於整個 bot 被接管,別把設定檔傳給別人。"
+	dcw_label.add_theme_font_size_override("font_size", 11)
+	dcw_label.modulate = Color(1, 0.75, 0.4)
+	vb.add_child(dcw_label)
+
+	var dcu_row: HBoxContainer = HBoxContainer.new()
+	var dcu_cap: Label = Label.new()
+	dcu_cap.text = "橋接位址"
+	dcu_cap.custom_minimum_size = Vector2(90, 0)
+	dcu_cap.tooltip_text = "sidecar 的 WebSocket 位址,通常不用改"
+	_dc_url = LineEdit.new()
+	_dc_url.placeholder_text = "ws://127.0.0.1:8765"
+	_dc_url.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_dc_url.text_changed.connect(_on_text_changed)
+	dcu_row.add_child(dcu_cap)
+	dcu_row.add_child(_dc_url)
+	vb.add_child(dcu_row)
+
 	## 底部按鈕在 outer（scroll 外），永遠看得到
 	var sep_bot: HSeparator = HSeparator.new()
 	outer.add_child(sep_bot)
@@ -1037,6 +1083,8 @@ func _collect() -> Dictionary:
 		"persona": _persona_edit.text,
 		"voice_engine": STT_ENGINES[maxi(0, _voice_engine.selected)],
 		"bp_asr_key": _stt_bp_key.text,
+		"discord_token": _dc_token.text,
+		"discord_url": _dc_url.text,
 		"stt_hotwords": _stt_hotwords.text,
 		"capture_system_audio": _sys_audio_check.button_pressed,
 		"voice_api_key": _voice_api_key.text,

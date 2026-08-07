@@ -1208,6 +1208,8 @@ func _build_chat_ui() -> void:
 	_discord = DiscordClient.new()
 	_discord.name = "DiscordClient"
 	add_child(_discord)
+	_discord.call("set_token", _config_get("discord", "token", ""))
+	_discord.call("set_url", _config_get("discord", "url", ""))
 	_discord.call("setup", _voice,
 		_config_get("voice", "bp_asr_key", ""),
 		_config_get("voice", "stt_hotwords", ""))
@@ -1943,6 +1945,8 @@ func _open_settings() -> void:
 		"bp_cluster": _voice.call("get_bp_cluster") if _voice else "",
 		"bp_speaker": _voice.call("get_bp_speaker") if _voice else "",
 		"bp_asr_key": _voice.call("get_bp_asr_key") if _voice else "",
+		"discord_token": _config_get("discord", "token", ""),
+		"discord_url": _config_get("discord", "url", ""),
 		"capture_system_audio": _voice.call("is_capture_system_audio") if _voice else false,
 		"stt_hotwords": _voice.call("get_stt_hotwords") if _voice else "",
 		"hotkey_keycode": _hotkey_keycode,
@@ -2063,6 +2067,11 @@ func _on_settings_changed(data: Dictionary) -> void:
 		_voice.call("set_bp_cluster", data.get("bp_cluster", ""))
 		_voice.call("set_bp_speaker", data.get("bp_speaker", ""))
 		_voice.call("set_bp_asr_key", data.get("bp_asr_key", ""))
+		if _discord != null:
+			_discord.call("set_token", String(data.get("discord_token", "")))
+			_discord.call("set_url", String(data.get("discord_url", "")))
+			_discord.call("set_api_key", String(data.get("bp_asr_key", "")))
+			_discord.call("set_hotwords", String(data.get("stt_hotwords", "")))
 		_voice.call("set_capture_system_audio", bool(data.get("capture_system_audio", false)))
 		_voice.call("set_stt_hotwords", data.get("stt_hotwords", ""))
 	_save_config()
@@ -2166,6 +2175,9 @@ func _save_config() -> void:
 		cfg.set_value("voice", "bp_cluster", _voice.call("get_bp_cluster"))
 		cfg.set_value("voice", "bp_speaker", _voice.call("get_bp_speaker"))
 		cfg.set_value("voice", "bp_asr_key", _voice.call("get_bp_asr_key"))
+	if _discord != null:
+		cfg.set_value("discord", "token", _discord.call("get_token"))
+		cfg.set_value("discord", "url", _discord.call("get_url"))
 		cfg.set_value("voice", "capture_system_audio", _voice.call("is_capture_system_audio"))
 		cfg.set_value("voice", "stt_hotwords", _voice.call("get_stt_hotwords"))
 	cfg.save(CONFIG_PATH)

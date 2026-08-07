@@ -12,6 +12,7 @@ extends Node
 
 signal speech_recognized(text: String, user_name: String)  ## 已過回音+熱詞閘門
 signal bridge_connected(up: bool)
+signal login_result(ok: bool, detail: String)
 signal channel_state(in_channel: bool)
 
 const DoroLogger := preload("res://scripts/logger.gd")
@@ -25,6 +26,7 @@ const MAX_QUEUE: int = 8            ## STT 待辨識上限,滿了丟最舊的(�
 
 var _ws: WebSocketPeer = null
 var _url: String = DEFAULT_URL
+var _token: String = ""       ## bot token,連上 sidecar 後轉交給它登入
 var _enabled: bool = false
 var _in_channel: bool = false
 var _reconnect_at_ms: int = 0
@@ -71,6 +73,18 @@ func set_hotwords(s: String) -> void:
 
 func set_url(u: String) -> void:
 	_url = u.strip_edges() if u.strip_edges() != "" else DEFAULT_URL
+
+func get_url() -> String:
+	return _url
+
+## Bot token 存在這邊、用在 sidecar。sidecar 是獨立進程,讀不到 Godot 的設定,
+## 所以連上之後由我們把 token 送過去讓它登入。
+## 留空的話 sidecar 會退回讀自己的 DISCORD_BOT_TOKEN 環境變數。
+func set_token(t: String) -> void:
+	_token = t.strip_edges()
+
+func get_token() -> String:
+	return _token
 
 func is_enabled() -> bool:
 	return _enabled
@@ -131,7 +145,9 @@ func _process(_dt: float) -> void:
 		if not _was_open:
 			_was_open = true
 			bridge_connected.emit(true)
-			DoroLogger.log("discord_bridge_up", {"url": _url})
+			DoroLogger.log("discord_bridge_up", {"url": _url, "has_token": _token != ""})
+			if _token != "":
+				_ws.send_text(JSON.stringify({"type": "login", "token": _token}))
 		while _ws.get_available_packet_count() > 0:
 			_handle_packet(_ws.get_packet())
 	elif st == WebSocketPeer.STATE_CLOSED:
@@ -152,7 +168,14 @@ func _handle_packet(raw: PackedByteArray) -> void:
 	var d: Dictionary = msg
 	match String(d.get("type", "")):
 		"ready":
-			DoroLogger.log("discord_sidecar_ready", {})
+			DoroLogger.log("discord_sidecar_ready", {
+				"logged_in": bool(d.get("logged_in", false))})
+		"login_result":
+			var ok: bool = bool(d.get("ok", false))
+			DoroLogger.log("discord_login", {
+				"ok": ok, "bot": String(d.get("bot", "")),
+				"error": String(d.get("error", ""))})
+			login_result.emit(ok, String(d.get("bot", "")) if ok else String(d.get("error", "")))
 		"joined":
 			_in_channel = true
 			channel_state.emit(true)
