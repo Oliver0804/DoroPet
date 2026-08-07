@@ -77,6 +77,14 @@ const FILLER_PHRASES: PackedStringArray = [
 	"嗯嗯?", "唔...讓我想想喔", "欸,等一下下喔", "讓Doro想一下下~"]
 var _filler_capture_path: String = ""    ## 非空 = 下一個生成的 wav 要複製進 filler cache
 var _filler_player: AudioStreamPlayer    ## cached filler 用獨立 player,不觸發 speaking signals
+## Filler 回音窗:filler 走獨立 player 不算 is_speaking,繞過 barge-in 那層防護,
+## 而且 ASR 很容易把它誤聽成別的字(實測「讓Doro想一下下~」→「讓都讓下」),
+## 字面比對擋不住 → 播放期間 + 尾窗內改用寬鬆比對,窗外不受影響。
+const FILLER_ECHO_TAIL_SEC: float = 3.0  ## 播完後還要防多久(ASR 伺服器 VAD 斷句有延遲)
+const FILLER_ECHO_RATIO: float = 0.4     ## 窗內的 LCS/長度 門檻(一般路徑仍是 0.5)
+var _filler_echo_until_ms: int = 0       ## 回音窗結束時間;0 = 不在窗內
+## 比對前要剝掉的標點(帶不帶句號會讓 LCS 比值差一截)
+const ECHO_PUNCT: String = "。，、？！~,.?!…:;：；「」『』()（）〜-— \t\n"
 
 var _engine: String = "local"        ## "local" | "api" | "bailian" | "byteplus"
 var _api_key: String = ""
@@ -281,6 +289,14 @@ func is_stt_stream() -> bool:
 	return _stt_stream_enabled and _engine == "byteplus" and _bp_asr_key != ""
 
 func _on_stream_utterance(text: String) -> void:
+	## Filler 回音優先擋:filler 不算 is_speaking,繞過下面的 barge-in 過濾,
+	## 而且誤聽後字面對不上一般門檻(「讓Doro想一下下~」→「讓都讓下」)
+	if _in_filler_echo_window():
+		var fm: String = _match_filler_echo(text)
+		if fm != "":
+			DoroLogger.log("stt_filler_echo_dropped", {
+				"text": text.substr(0, 60), "matched": fm})
+			return
 	## Echo 檢查不再依賴 is_speaking:STT 有延遲,TTS 講完後幾秒內收到的相似句仍算回音
 	var matched: String = _match_recent_spoken(text)
 	if matched != "":
@@ -414,13 +430,49 @@ func speak_filler() -> bool:
 			_recent_spoken = _recent_spoken.slice(_recent_spoken.size() - RECENT_SPOKEN_KEEP)
 		_filler_player.stream = stream
 		_filler_player.play()
+		_open_filler_echo_window(stream.get_length())
 		DoroLogger.log("filler_play", {"idx": idx, "cached": true})
 		return true
 	## 沒 cache → 真 TTS 生成一次(只發生首輪),同時把 wav 捕捉進 cache
 	DoroLogger.log("filler_play", {"idx": idx, "cached": false})
 	speak(phrase)
+	## 這條路徑拿不到音檔長度,用語速估(只發生首輪,估不準也還有 3 秒尾窗兜著)
+	_open_filler_echo_window(float(phrase.length()) / SPEAK_CHARS_PER_SEC)
 	_filler_capture_path = cache_path
 	return true
+
+## 開啟 filler 回音窗:播放長度 + 尾窗
+func _open_filler_echo_window(play_sec: float) -> void:
+	_filler_echo_until_ms = Time.get_ticks_msec() + int(
+		(maxf(play_sec, 0.0) + FILLER_ECHO_TAIL_SEC) * 1000.0)
+
+func _in_filler_echo_window() -> bool:
+	return _filler_echo_until_ms > 0 and Time.get_ticks_msec() < _filler_echo_until_ms
+
+## 剝掉標點與空白:「讓都讓下。」帶句號是 5 字比值 0.4,剝掉是 4 字比值 0.5,
+## 差一個標點就決定攔不攔得住,比對前一律先剝
+static func _strip_punct(s: String) -> String:
+	var out: String = ""
+	for i in range(s.length()):
+		var ch: String = s[i]
+		if not ECHO_PUNCT.contains(ch):
+			out += ch
+	return out
+
+## 窗內比對:拿 utterance 直接跟 4 句 filler 比(不查 _recent_spoken,
+## cache 命中/miss 兩條路徑都蓋得到)。命中回傳那句 filler,沒中回 ""
+func _match_filler_echo(utter: String) -> String:
+	var u: String = _strip_punct(utter)
+	if u == "":
+		return ""
+	for p in FILLER_PHRASES:
+		var s: String = _strip_punct(p)
+		if s == "":
+			continue
+		var ov: int = _lcs_len(u.substr(0, 40), s.substr(0, 80))
+		if float(ov) / float(u.length()) >= FILLER_ECHO_RATIO:
+			return p
+	return ""
 
 ## TTS 生成出 wav 時,若正等著捕捉 filler → 複製一份進 cache
 func _maybe_capture_filler(src_path: String) -> void:
