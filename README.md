@@ -10,6 +10,7 @@
 - **滑鼠滾輪** 放大縮小（自動記住大小）
 - **視線跟滑鼠**（頭、眼、身體角度都會跟）
 - **跟 Doro 聊天**（按 Enter 或右鍵選單；走 OpenRouter API）
+- **進 Discord 語音頻道跟人講話**（多人、per-user 記憶、語音進語音出）
 - 內建 Idle 動作 + 物理擺動（頭髮飄）
 
 ## 對話功能（OpenRouter）
@@ -28,6 +29,69 @@ echo 'export OPENROUTER_API_KEY=sk-or-v1-xxxxxxxx' > ~/.doropet.env
 沒設 API key 時只是按 Enter 沒反應（其他功能照常）。預設 model `bytedance-seed/seed-1.6-flash`，要換模型改 `OPENROUTER_MODEL` 即可（任何 OpenRouter 支援的 chat 模型 ID）。
 
 對話會保留最近 8 對歷史；右鍵選單「清空對話」可重置。
+
+## Discord 語音頻道
+
+讓 Doro 進 Discord 語音頻道，跟頻道裡的人用講的對話。它會記得誰說過什麼
+（以 Discord user id 為 key，查詢結果帶日期），並在回話前先查一次。
+
+### 1. 建立你自己的 bot
+
+這個專案**不提供公用 bot**——語音會送到你自己的 STT / LLM 帳號，
+所以每個人得跑自己的。三分鐘就好：
+
+1. 到 [Discord Developer Portal](https://discord.com/developers/applications) → **New Application**
+2. 左側 **Bot** → **Reset Token**，複製 token
+3. 左側 **General Information** → 複製 **Application ID**
+
+不需要開任何 Privileged Intent（用的是 slash command，不讀訊息內容）。
+
+### 2. 邀請進你的伺服器
+
+把下面網址的 `你的APPLICATION_ID` 換成剛複製的那串數字，貼進瀏覽器：
+
+```
+https://discord.com/api/oauth2/authorize?client_id=你的APPLICATION_ID&permissions=36700160&scope=bot%20applications.commands
+```
+
+`permissions=36700160` = `Connect` + `Speak` + `Use Voice Activity`，剛好夠用不多給。
+`scope` 兩個都要，少了 `applications.commands` 的話 `/doro` 指令不會出現。
+
+### 3. 填 token 並啟動
+
+設定 → **🎧 Discord 語音** → 貼上 Bot Token → 儲存。
+然後右鍵選單勾 **🎧 Discord 語音**，Doro 會自己把橋接程式拉起來
+（第一次會需要 `cd discord_bridge && npm install`）。
+
+最後自己進一個語音頻道，打 `/doro join`。`/doro leave` 讓它離開。
+
+### 怎麼叫它
+
+頻道裡不是每句話都要回應，所以**第一句要叫到名字**（「Doro」或設定裡的熱詞），
+之後 40 秒內同一個人講話不用再叫，聊得順就一直延續。
+別人插話沒叫名字仍然會被略過——他叫了就換他接手。
+
+### 進頻道時會自動做的事
+
+主人自己通常也在頻道裡、也在同一台電腦前，所以：
+
+| 項目 | 進頻道後 |
+|---|---|
+| 桌面喇叭 | **完全靜音**（聲音只走 Discord） |
+| 本地常駐聽 | 關閉（否則你講一句會被本地麥克風和 Discord 各收一次） |
+| 隨機念話 | 跳過 |
+| **截圖功能** | **停用**——那是你的螢幕，頻道裡還有別人 |
+
+離開頻道全部自動恢復。
+
+### 需要
+
+`node >= 18`、`ffmpeg`（收音的重採樣要用）。細節與疑難排解見
+[`discord_bridge/README.md`](discord_bridge/README.md)。
+
+> Discord 官方並未正式支援「接收」語音，`@discordjs/voice` 的 receive
+> 長期可用但不在官方保證範圍。另外錄他人語音在多數地區需要告知參與者，
+> bot 進頻道時提一句比較妥當。
 
 ## 一鍵安裝
 
