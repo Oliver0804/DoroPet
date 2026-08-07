@@ -34,7 +34,10 @@ const WS_PORT = Number(process.env.DORO_BRIDGE_PORT || 8765);
 const DEBUG_DUMP = process.env.DORO_BRIDGE_DEBUG === '1';
 
 const SILENCE_MS = 800;          // 停頓多久算一句講完
-const MIN_SPEECH_SEC = 0.4;      // 比這短的當雜訊丟掉(咳嗽、鍵盤聲)
+// 比這短的當雜訊丟掉。實測 0.4 太寬鬆:呼吸聲、鍵盤聲、椅子聲都過得去,
+// 送到 STT 換回一句「沒辨識到內容」,白花錢。0.8 擋掉絕大多數,
+// 代價是「嗯」「對」這種極短回應會被吃掉 —— 但在熱詞閘門下那種話本來也不會觸發 Doro
+const MIN_SPEECH_SEC = 0.8;
 const MAX_SPEECH_SEC = 30;       // 保險:單句上限,避免有人開麥不放炸記憶體
 
 function log(...a) { console.log(new Date().toISOString().slice(11, 19), ...a); }
