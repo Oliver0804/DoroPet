@@ -95,6 +95,7 @@ const ChatClient := preload("res://scripts/chat_client.gd")
 const SettingsDialog := preload("res://scripts/settings_dialog.gd")
 const VoiceClient := preload("res://scripts/voice_client.gd")
 const DiscordClient := preload("res://scripts/discord_client.gd")
+const PeopleStore := preload("res://scripts/people_store.gd")
 const LogsViewer := preload("res://scripts/logs_viewer.gd")
 const Updater := preload("res://scripts/updater.gd")
 const DoroLogger := preload("res://scripts/logger.gd")
@@ -140,7 +141,9 @@ var _tray_menu: PopupMenu
 var _hidden: bool = false
 var _chat: Node                            ## ChatClient 實例
 var _discord: Node                         ## DiscordClient(語音橋,預設關)
+var _people: Node                          ## PeopleStore(Discord 各人說過的話)
 var _discord_prev_always_listen: bool = false  ## 進 DC 頻道前的常駐聽狀態,離開時還原
+var _last_discord_uid: String = ""            ## 上一句是誰講的(換人才重組 context)
 var _voice: Node                           ## VoiceClient 實例
 var _bubble_window: Window                 ## 浮在 Doro 頭頂的對話氣泡（獨立視窗）
 var _bubble: PanelContainer
@@ -1210,6 +1213,11 @@ func _build_chat_ui() -> void:
 	_voice.call("set_bp_cluster", _config_get("voice", "bp_cluster", ""))
 	_voice.call("set_bp_speaker", _config_get("voice", "bp_speaker", ""))
 	## Discord 語音橋:預設關,從選單開。開了才會去連 sidecar
+	_people = PeopleStore.new()
+	_people.name = "PeopleStore"
+	add_child(_people)
+	_chat.call("set_people_store", _people)
+
 	_discord = DiscordClient.new()
 	_discord.name = "DiscordClient"
 	add_child(_discord)
@@ -1456,6 +1464,7 @@ func _on_chat_reply(text: String, emotion: int) -> void:
 	_cancel_filler_timer()
 	## Stream 模式下第一句已經 speak 過、bubble 已顯示、emotion 已 set
 	## reply_received 這裡拿到的是「完整版全文」,只做收尾(不再重啟 TTS)
+	_record_doro_reply(text)
 	if _stream_active:
 		_stream_reply_accum = text     ## 對齊 full text
 		if _bubble_window != null and _bubble_window.visible:
@@ -1869,6 +1878,7 @@ func _enter_discord_mode(invoker_name: String = "") -> void:
 	_show_bubble("🎧 Doro 進語音頻道了", 3.0)
 
 func _leave_discord_mode() -> void:
+	_last_discord_uid = ""
 	if _chat != null:
 		_chat.call("set_context_note", "")   ## 回到主人桌面的情境
 	if _voice == null or not bool(_voice.call("is_tts_sink_external")):
@@ -1883,13 +1893,30 @@ func _leave_discord_mode() -> void:
 
 ## 頻道裡有人叫 Doro(已過回音檢查+熱詞閘門)。
 ## 帶說話者名字進去,不然多人頻道裡 Doro 分不出誰是誰
-func _on_discord_speech(text: String, user_name: String) -> void:
+func _on_discord_speech(text: String, user_name: String, user_id: String) -> void:
+	if _people != null and user_id != "":
+		_people.call("record", user_id, user_name, text, "user")
+		## 換人講話就換一份「印象」進 context —— 這樣 Doro 認得對方是誰、
+		## 上次聊過什麼,不用每次都靠 recall_person 主動查
+		if _chat != null and user_id != _last_discord_uid:
+			_last_discord_uid = user_id
+			var note: String = _discord_context_note(_discord.call("get_invoker"))
+			note += String(_people.call("recent_brief", user_id))
+			_chat.call("set_context_note", note)
 	_on_voice_transcribed("%s:%s" % [user_name, text])
 
 ## Doro 的 TTS wav → 送進語音頻道
 func _on_tts_wav_for_discord(wav: PackedByteArray) -> void:
 	if _discord != null:
 		_discord.call("send_tts_wav", wav)
+
+## Doro 講的話也要進人物記憶,不然查某人的紀錄會變成一串獨白看不出上下文
+func _record_doro_reply(text: String) -> void:
+	if _people == null or _discord == null or _last_discord_uid == "":
+		return
+	if not bool(_discord.call("is_in_channel")):
+		return
+	_people.call("record", _last_discord_uid, "Doro", text, "doro")
 
 func _on_voice_error(reason: String) -> void:
 	_end_thinking()

@@ -12,7 +12,7 @@ extends Node
 ## - 回音檢查放在熱詞閘門「之前」。Doro 人設自稱「Doro」,幾乎每句都含熱詞,
 ##   別人的喇叭把牠的聲音收回頻道時會必過閘門 → 自問自答,而且是跨網路的。
 
-signal speech_recognized(text: String, user_name: String)  ## 已過回音+熱詞閘門
+signal speech_recognized(text: String, user_name: String, user_id: String)  ## 已過回音+熱詞閘門
 signal bridge_connected(up: bool)
 signal login_result(ok: bool, detail: String)
 signal channel_state(in_channel: bool, invoker_name: String)
@@ -41,6 +41,7 @@ var _stt: Node = null
 var _queue: Array = []              ## [{wav: PackedByteArray, user_name: String}]
 var _stt_busy: bool = false
 var _cur_user: String = ""
+var _cur_uid: String = ""      ## 記憶庫以 id 為 key(顯示名稱會改,id 不會)
 
 var _hotwords: PackedStringArray = []
 ## 對話延續窗:叫過一次名字後,同一個人在窗內講話不用再叫。
@@ -295,7 +296,8 @@ func _enqueue_speech(d: Dictionary) -> void:
 	var wav: PackedByteArray = Marshalls.base64_to_raw(b64)
 	if wav.size() < 44:
 		return
-	_queue.append({"wav": wav, "user_name": String(d.get("user_name", "?"))})
+	_queue.append({"wav": wav, "user_name": String(d.get("user_name", "?")),
+		"user_id": String(d.get("user_id", ""))})
 	if _queue.size() > MAX_QUEUE:
 		var dropped: Dictionary = _queue.pop_front()
 		DoroLogger.log("discord_speech_dropped", {
@@ -308,6 +310,7 @@ func _pump_queue() -> void:
 		return
 	var item: Dictionary = _queue.pop_front()
 	_cur_user = String(item.get("user_name", "?"))
+	_cur_uid = String(item.get("user_id", ""))
 	_stt_busy = true
 	_stt.call("start", item["wav"])
 
@@ -318,14 +321,15 @@ func _on_stt_fail(reason: String) -> void:
 
 func _on_stt_ok(text: String) -> void:
 	var user: String = _cur_user
+	var uid: String = _cur_uid
 	_stt_busy = false
 	var t: String = text.strip_edges()
 	if t != "":
-		_consider(t, user)
+		_consider(t, user, uid)
 	_pump_queue()
 
 ## 收到的話要不要送 LLM。兩道關卡,順序不能顛倒。
-func _consider(text: String, user: String) -> void:
+func _consider(text: String, user: String, uid: String = "") -> void:
 	## 1. 回音:頻道裡有人開喇叭的話,Doro 自己的聲音會被那個人的麥克風收回來,
 	##    變成「那個人說的話」送回來。而 Doro 幾乎每句都自稱 Doro → 必過熱詞閘門,
 	##    不先擋就會無限自問自答
@@ -347,18 +351,31 @@ func _consider(text: String, user: String) -> void:
 	_extend_talk_window()
 	DoroLogger.log("discord_speech", {
 		"user": user, "text": text, "by": "hotword" if by_hotword else "continuing"})
-	speech_recognized.emit(text, user)
+	speech_recognized.emit(text, user, uid)
 
 ## 每次對話往來都把窗往後推,聊得順就一直有效;安靜下來才收掉
 func _extend_talk_window() -> void:
 	_talk_until_ms = Time.get_ticks_msec() + int(CONTINUE_SEC * 1000.0)
 
+## STT 常把英文名字逐字母吐出來(實測「Doro」→「D O R O」),
+## 直接比對就對不上,使用者明明喊了名字卻被當閒聊擋掉。
+## 比對前把空白與標點清掉,兩邊都正規化
+const HOTWORD_STRIP: String = " \t\n\r，,。.、!！?？~〜-_·・:：;；\"\'「」()（）"
+
+static func _norm_hotword(s: String) -> String:
+	var out: String = ""
+	for i in range(s.length()):
+		var ch: String = s[i]
+		if not HOTWORD_STRIP.contains(ch):
+			out += ch
+	return out.to_lower()
+
 func _has_hotword(text: String) -> bool:
 	if _hotwords.is_empty():
 		return true          ## 沒設熱詞 = 不過濾
-	var low: String = text.to_lower()
+	var low: String = _norm_hotword(text)
 	for w in _hotwords:
-		if low.contains(w):
+		if low.contains(_norm_hotword(w)):
 			return true
 	return false
 

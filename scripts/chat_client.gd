@@ -135,11 +135,12 @@ const SYSTEM_RULES: String = """
 若仍看不懂,可用 emotion=4(疑問)反問澄清。
 
 【工具呼叫】
-你有 5 個工具:get_time、get_weather、take_screenshot、recall_memory、web_search。
+你有 6 個工具:get_time、get_weather、take_screenshot、recall_memory、recall_person、web_search。
 - **現在時間已寫在上面「你當下的時間感」段,直接用,不要呼叫 get_time**
   (只有主人明確要精確到秒的時間才呼叫)
 - 問天氣 → get_weather;要你看畫面 → take_screenshot
 - 主人問起更早以前的事、或你記憶裡沒有的舊話題 → recall_memory 翻舊帳
+- 有人問「我上次說什麼」「你記得我嗎」,或你想確認某人提過的事 → recall_person(帶日期)
 - 問**新聞、當前事件、你不知道的人事物、統計數據、產品資訊、比賽結果**等
   需要即時網路資料的問題 → web_search 查了再答,不要憑印象亂講
 **嚴禁**只回「我看看」「稍等我這就看」「Doro 不太清楚耶」這種話而不呼叫工具——
@@ -193,6 +194,21 @@ const TOOLS_SCHEMA: Array = [
 	{
 		"type": "function",
 		"function": {
+			"name": "recall_person",
+			"description": "查某個人(Discord 頻道裡的人)以前說過什麼,結果會帶日期。當有人問「我上次說什麼」「你還記得我嗎」、或你想確認某人之前提過的事、或想知道自己認不認識這個人時使用。",
+			"parameters": {
+				"type": "object",
+				"properties": {
+					"who": {"type": "string", "description": "人名(Discord 顯示名稱);留空 = 查所有人"},
+					"keyword": {"type": "string", "description": "要找的話題關鍵字;留空 = 給這個人最近說過的話"},
+				},
+				"required": ["who"],
+			},
+		},
+	},
+	{
+		"type": "function",
+		"function": {
 			"name": "take_screenshot",
 			"description": "拍主螢幕當下畫面。當使用者問你『看畫面』『螢幕上是什麼』『這段 code 哪錯』等需要視覺資訊的問題就呼叫;截圖會放在下一條訊息給你看。",
 			"parameters": {"type": "object", "properties": {}, "required": []},
@@ -235,6 +251,7 @@ var _round: int = 0
 var _empty_retried: bool = false           ## 本輪已為「content 空」重送過一次
 var _pending_image_b64: String = ""              ## LLM call take_screenshot 後待塞的圖
 var _mem: Node                                   ## MemoryStore(歷史落盤 + 主人筆記)
+var _people: Node                                ## PeopleStore(Discord 各人說過的話,可查)
 var _mood: Node                                  ## MoodState(愉悅/活力兩軸,持久化)
 ## in-flight 期間主人又講話的排隊(避免「等 Doro 回覆中」把後續話吃掉)
 var _pending_texts: PackedStringArray = []
@@ -305,6 +322,10 @@ func get_persona() -> String:
 	return _persona
 
 ## 設定場合註記(空字串 = 回到預設的「主人桌面」情境)
+## Discord 模式下由 pet.gd 掛上,讓 recall_person 這個工具有東西可查
+func set_people_store(p: Node) -> void:
+	_people = p
+
 func set_context_note(s: String) -> void:
 	_context_note = ("\n\n" + s.strip_edges()) if s.strip_edges() != "" else ""
 
