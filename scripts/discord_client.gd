@@ -35,7 +35,7 @@ var _invoker: String = ""     ## 打 /doro join 把 Doro 叫進來的人 = 主�
 var _reconnect_at_ms: int = 0
 var _was_open: bool = false
 var _sidecar_pid: int = -1        ## 我們自己啟動的 sidecar(手動啟動的不歸我們管)
-var _spawn_tried: bool = false    ## 一輪 enable 只嘗試自動啟動一次,免得連不上就狂 spawn
+var _last_spawn_ms: int = -1      ## 上次嘗試 spawn 的時間(冷卻用,免得連不上就狂 spawn)
 
 var _stt: Node = null
 var _queue: Array = []              ## [{wav: PackedByteArray, user_name: String}]
@@ -118,7 +118,7 @@ func set_enabled(on: bool) -> void:
 	_enabled = on
 	if on:
 		_reconnect_at_ms = 0
-		_spawn_tried = false
+		_last_spawn_ms = -1
 		set_process(true)
 		_connect_now()
 	else:
@@ -157,10 +157,13 @@ func _sidecar_script() -> String:
 	var p: String = ProjectSettings.globalize_path("res://discord_bridge/index.js")
 	return p if FileAccess.file_exists(p) else ""
 
+## sidecar 中途掛掉也要能重新拉起來,所以用冷卻時間而不是一次性旗標
+const SPAWN_COOLDOWN_MS: int = 30_000
+
 func _spawn_sidecar() -> bool:
-	if _spawn_tried:
+	if _last_spawn_ms >= 0 and Time.get_ticks_msec() - _last_spawn_ms < SPAWN_COOLDOWN_MS:
 		return false
-	_spawn_tried = true
+	_last_spawn_ms = Time.get_ticks_msec()
 	var script: String = _sidecar_script()
 	if script == "":
 		DoroLogger.log("discord_spawn_skip", {"reason": "找不到 discord_bridge/index.js"})
@@ -189,6 +192,12 @@ func _spawn_sidecar() -> bool:
 
 func _kill_sidecar() -> void:
 	if _sidecar_pid <= 0:
+		return
+	## PID 會被 OS 回收再分配給別人。sidecar 可能已經自己退出了
+	## (失聯逾時自清),這時盲目 kill 會殺到無關的進程
+	if not OS.is_process_running(_sidecar_pid):
+		DoroLogger.log("discord_spawn_gone", {"pid": _sidecar_pid})
+		_sidecar_pid = -1
 		return
 	OS.kill(_sidecar_pid)
 	DoroLogger.log("discord_spawn_kill", {"pid": _sidecar_pid})

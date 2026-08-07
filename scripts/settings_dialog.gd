@@ -3,6 +3,7 @@ extends Window
 
 signal settings_changed(data: Dictionary)
 signal logs_requested
+signal memory_file_cleared(path: String)   ## 清完檔案:有記憶體快取的模組要重載
 
 ## 由 pet.gd 在 open() 時帶入當前值
 var _initial: Dictionary = {}
@@ -1165,6 +1166,8 @@ const MEMORY_FILES: Array = [
 	 "hint": "Doro 從對話蒸餾出來的長期記憶,每行一條 JSON"},
 	{"title": "💬 短期歷史", "path": "user://doro_history.json",
 	 "hint": "最近對話原文,做為上下文回饋"},
+	{"title": "🎧 人物記憶(Discord)", "path": "user://doro_people_log.jsonl",
+		"hint": "頻道裡每個人講過的話(逐字原文+時間)。清掉後 Doro 不再記得他們說過什麼。"},
 	{"title": "📦 已歸檔事實", "path": "user://doro_archive.jsonl",
 	 "hint": "已刪除 / 過期的舊事實,可被 recall 翻回來"},
 	{"title": "📄 v1 舊筆記", "path": "user://doro_memory.txt",
@@ -1296,6 +1299,7 @@ func _confirm_clear_current_memory() -> void:
 		var abs: String = ProjectSettings.globalize_path(path)
 		if FileAccess.file_exists(path):
 			DirAccess.remove_absolute(abs)
+		memory_file_cleared.emit(path)
 		_reload_memory_viewer()
 	)
 	add_child(confirm)

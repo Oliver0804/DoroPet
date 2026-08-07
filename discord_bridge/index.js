@@ -306,7 +306,9 @@ async function doLogin(token) {
 }
 
 // ---------- WebSocket(給 Godot) ----------
-const wss = new WebSocketServer({ host: '127.0.0.1', port: WS_PORT });
+// maxPayload:一句 30 秒的 16k mono wav base64 後約 1.3MB,8MB 綽綽有餘。
+// 不設的話預設上限很大,異常輸入可能吃掉一堆記憶體
+const wss = new WebSocketServer({ host: '127.0.0.1', port: WS_PORT, maxPayload: 8 * 1024 * 1024 });
 wss.on('connection', (ws) => {
 	if (bridge && bridge.readyState === 1) bridge.close();
 	bridge = ws;

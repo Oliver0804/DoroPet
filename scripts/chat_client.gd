@@ -345,8 +345,16 @@ func _tools_for_request() -> Array:
 		out.append(t)
 	return out
 
+## 上限保護:這段每輪都會送,而人物記憶的內容是使用者講出來的,長度不可控
+const CONTEXT_NOTE_MAX: int = 2000
 func set_context_note(s: String) -> void:
-	_context_note = ("\n\n" + s.strip_edges()) if s.strip_edges() != "" else ""
+	var t: String = s.strip_edges()
+	if t == "":
+		_context_note = ""
+		return
+	if t.length() > CONTEXT_NOTE_MAX:
+		t = t.substr(0, CONTEXT_NOTE_MAX) + "\n(…略)"
+	_context_note = "\n\n" + t
 
 func get_context_note() -> String:
 	return _context_note

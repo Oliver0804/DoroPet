@@ -1994,6 +1994,7 @@ func _open_settings() -> void:
 		add_child(_settings)
 		_settings.settings_changed.connect(_on_settings_changed)
 		_settings.logs_requested.connect(_open_logs)
+		_settings.memory_file_cleared.connect(_on_memory_file_cleared)
 	## 把 voice node 注入,讓 dialog 自己列裝置 / 跑測試 / 顯示 RMS
 	_settings.call("set_voice_node", _voice)
 	var data: Dictionary = {
@@ -2070,6 +2071,13 @@ func _open_context_debug() -> void:
 		_debug_window.call("set_chat", _chat)
 		add_child(_debug_window)
 	_debug_window.call("open_debug")
+
+## 資料管理頁刪了某個記憶檔 → 有記憶體快取的模組要跟著重載,
+## 不然快取會在下次寫入時把舊資料整批寫回去,使用者以為刪了其實沒刪
+func _on_memory_file_cleared(path: String) -> void:
+	if path == "user://doro_people_log.jsonl" and _people != null:
+		_people.call("reload")
+		DoroLogger.log("people_log_reloaded", {"reason": "cleared from settings"})
 
 func _on_settings_changed(data: Dictionary) -> void:
 	## 即時套用 + 寫 config

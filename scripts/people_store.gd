@@ -16,7 +16,6 @@ const MAX_ENTRIES: int = 4000      ## 超過就砍最舊的(一行約 100 bytes,
 const TRIM_TO: int = 3000          ## 砍一次就砍到這個量,不要每次都在邊界上重寫檔案
 
 var _entries: Array = []           ## [{uid, name, text, ts, by}]
-var _dirty: bool = false
 
 func _ready() -> void:
 	_load()
@@ -37,30 +36,42 @@ func _load() -> void:
 			_entries.append(d)
 	f.close()
 
-func _save() -> void:
-	if not _dirty:
-		return
+## 整檔重寫。只在 trim(砍舊資料)時才做 —— 平常走 _append_one,
+## 不然語音頻道每講一句就要重寫整個檔案(4000 條約 480KB),磁碟會一直被打
+func _rewrite_all() -> void:
 	var f: FileAccess = FileAccess.open(LOG_PATH, FileAccess.WRITE)
 	if f == null:
 		return
 	for e in _entries:
 		f.store_line(JSON.stringify(e))
 	f.close()
-	_dirty = false
+
+func _append_one(e: Dictionary) -> void:
+	var f: FileAccess = FileAccess.open(LOG_PATH, FileAccess.READ_WRITE)
+	if f == null:
+		f = FileAccess.open(LOG_PATH, FileAccess.WRITE)   ## 檔案還不存在
+		if f == null:
+			return
+	else:
+		f.seek_end()
+	f.store_line(JSON.stringify(e))
+	f.close()
 
 ## 記一句話。by: "user" = 對方說的, "doro" = Doro 回的
 func record(uid: String, name: String, text: String, by: String = "user") -> void:
 	var t: String = text.strip_edges()
 	if t == "" or uid == "":
 		return
-	_entries.append({
+	var e: Dictionary = {
 		"uid": uid, "name": name, "text": t.substr(0, 300),
 		"ts": int(Time.get_unix_time_from_system()), "by": by,
-	})
+	}
+	_entries.append(e)
 	if _entries.size() > MAX_ENTRIES:
 		_entries = _entries.slice(_entries.size() - TRIM_TO)
-	_dirty = true
-	_save()
+		_rewrite_all()          ## 砍過才需要整檔重寫
+	else:
+		_append_one(e)          ## 平常只補一行
 
 ## 這個人講過幾句(用來判斷是不是新面孔)
 func count_for(uid: String) -> int:
@@ -146,6 +157,18 @@ func recent_brief(uid: String, n: int = 6) -> String:
 	for e in hits:
 		out += "- [%s] %s\n" % [_date_of(int(e.get("ts", 0))), String(e.get("text", ""))]
 	return out
+
+## 清空(設定 → 資料管理)。這裡存的是頻道裡每個人講話的逐字原文,
+## 使用者要能自己刪掉
+func clear_all() -> void:
+	_entries.clear()
+	_rewrite_all()
+	DoroLogger.log("people_log_cleared", {})
+
+## 檔案被外部刪掉(設定的資料管理頁)後重讀。
+## 不重讀的話記憶體裡的舊資料會在下次 record 時被寫回檔案,等於沒刪掉
+func reload() -> void:
+	_load()
 
 static func _date_of(ts: int) -> String:
 	if ts <= 0:
