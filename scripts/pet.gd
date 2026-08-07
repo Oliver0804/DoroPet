@@ -1217,6 +1217,10 @@ func _build_chat_ui() -> void:
 	_discord.connect("channel_state", _on_discord_channel_state)
 	_discord.connect("bridge_connected", _on_discord_bridge)
 	_voice.connect("tts_wav_ready", _on_tts_wav_for_discord)
+	## 上次關掉時是開著的 → 還原。sidecar 若還在頻道會補發 joined,直接接回去
+	if bool(_config_get("discord", "enabled", false)):
+		_discord.call("set_enabled", true)
+		call_deferred("_sync_discord_menu_check")
 
 	_voice.call("set_bp_asr_key", _config_get("voice", "bp_asr_key", ""))
 	_voice.call("set_capture_system_audio", bool(_config_get("voice", "capture_system_audio", false)))
@@ -1789,6 +1793,11 @@ func _on_voice_transcribed(text: String) -> void:
 			_start_input_idle_timer()
 
 ## ---------- Discord 語音橋 ----------
+func _sync_discord_menu_check() -> void:
+	if _menu != null and _discord != null:
+		_menu.set_item_checked(_menu.get_item_index(45),
+			bool(_discord.call("is_enabled")))
+
 func _toggle_discord() -> void:
 	if _discord == null:
 		return
@@ -2201,6 +2210,7 @@ func _save_config() -> void:
 	if _discord != null:
 		cfg.set_value("discord", "token", _discord.call("get_token"))
 		cfg.set_value("discord", "url", _discord.call("get_url"))
+		cfg.set_value("discord", "enabled", _discord.call("is_enabled"))
 		cfg.set_value("voice", "capture_system_audio", _voice.call("is_capture_system_audio"))
 		cfg.set_value("voice", "stt_hotwords", _voice.call("get_stt_hotwords"))
 	cfg.save(CONFIG_PATH)
