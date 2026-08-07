@@ -43,6 +43,12 @@ var _stt_busy: bool = false
 var _cur_user: String = ""
 
 var _hotwords: PackedStringArray = []
+## 對話延續窗:叫過一次名字後,同一個人在窗內講話不用再叫。
+## 沒這個的話,連續對話每句都得喊「Doro」,講到一半沒喊就被當閒聊丟掉,
+## 從使用者角度看就是「Doro 突然不理人」
+const CONTINUE_SEC: float = 40.0
+var _talker: String = ""            ## 正在跟 Doro 對話的人
+var _talk_until_ms: int = 0         ## 這個窗什麼時候過期
 var _voice: Node = null             ## 借它的 _match_recent_spoken 擋跨網路回音
 
 func _exit_tree() -> void:
@@ -274,6 +280,8 @@ func _handle_packet(raw: PackedByteArray) -> void:
 		"left":
 			_in_channel = false
 			_invoker = ""
+			_talker = ""
+			_talk_until_ms = 0
 			_queue.clear()
 			channel_state.emit(false, "")
 			DoroLogger.log("discord_left", {})
@@ -328,12 +336,22 @@ func _consider(text: String, user: String) -> void:
 				"text": text.substr(0, 60), "matched": matched.substr(0, 40), "user": user})
 			return
 	## 2. 熱詞閘門:語音頻道是多人閒聊,不是每句都在跟 Doro 講話。
-	##    沒叫到牠就只做 STT 不送 LLM(STT 便宜,LLM 貴一個量級)
-	if not _has_hotword(text):
+	##    沒叫到牠就只做 STT 不送 LLM(STT 便宜,LLM 貴一個量級)。
+	##    但對話進行中的接續不該被擋 —— 那是同一段對話,不是新的搭話
+	var by_hotword: bool = _has_hotword(text)
+	var continuing: bool = user == _talker and Time.get_ticks_msec() < _talk_until_ms
+	if not by_hotword and not continuing:
 		DoroLogger.log("discord_no_hotword", {"text": text.substr(0, 60), "user": user})
 		return
-	DoroLogger.log("discord_speech", {"user": user, "text": text})
+	_talker = user
+	_extend_talk_window()
+	DoroLogger.log("discord_speech", {
+		"user": user, "text": text, "by": "hotword" if by_hotword else "continuing"})
 	speech_recognized.emit(text, user)
+
+## 每次對話往來都把窗往後推,聊得順就一直有效;安靜下來才收掉
+func _extend_talk_window() -> void:
+	_talk_until_ms = Time.get_ticks_msec() + int(CONTINUE_SEC * 1000.0)
 
 func _has_hotword(text: String) -> bool:
 	if _hotwords.is_empty():
@@ -350,6 +368,7 @@ func send_tts_wav(wav: PackedByteArray) -> void:
 		return
 	if wav.is_empty():
 		return
+	_extend_talk_window()   ## 牠回話花的時間不該吃掉主人接話的窗
 	_ws.send_text(JSON.stringify({
 		"type": "speak", "wav_b64": Marshalls.raw_to_base64(wav)}))
 

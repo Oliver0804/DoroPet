@@ -226,12 +226,12 @@ client.on(Events.InteractionCreate, async (itr) => {
 		if (conn) conn.destroy();
 		currentChannel = null;
 		sendToGodot({ type: 'left' });
-		await itr.reply({ content: 'Doro 走了。', ephemeral: true });
+		await itr.reply({ content: 'Doro 走了。', flags: 64 });
 		return;
 	}
 	const ch = itr.member?.voice?.channel;
 	if (!ch) {
-		await itr.reply({ content: '你得先自己進一個語音頻道。', ephemeral: true });
+		await itr.reply({ content: '你得先自己進一個語音頻道。', flags: 64 });
 		return;
 	}
 	try {
@@ -239,10 +239,10 @@ client.on(Events.InteractionCreate, async (itr) => {
 			name: itr.member.displayName || itr.user.username,
 			id: itr.user.id,
 		});
-		await itr.reply({ content: `Doro 進來了(${ch.name})。`, ephemeral: true });
+		await itr.reply({ content: `Doro 進來了(${ch.name})。`, flags: 64 });
 	} catch (e) {
 		log('加入失敗', e.message);
-		await itr.reply({ content: `進不去:${e.message}`, ephemeral: true });
+		await itr.reply({ content: `進不去:${e.message}`, flags: 64 });
 	}
 });
 
