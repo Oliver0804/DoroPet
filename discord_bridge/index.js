@@ -45,6 +45,10 @@ const client = new Client({
 });
 
 let bridge = null;               // 目前的 WS 連線(Godot)
+// 目前所在頻道與召喚者。Godot 可能中途重啟(它會自動重連),
+// 而 joined 只在加入當下發一次 → 存起來,Godot 一連上就補發,
+// 不然它會停在「不在頻道」狀態,TTS 就送不出去
+let currentChannel = null;       // {guildId, channelId, invokerName, invokerId}
 const activeSpeakers = new Map(); // userId -> true,防同一人重複 subscribe
 let player = null;
 const playQueue = [];
@@ -107,7 +111,7 @@ async function captureOne(receiver, userId, guildId) {
 	if (DEBUG_DUMP) {
 		const dir = path.join(HERE, 'debug');
 		fs.mkdirSync(dir, { recursive: true });
-		const f = path.join(dir, `${Date.now()}_${userName.replace(/[^\w-]/g, '_')}.wav`);
+		const f = path.join(dir, `${Date.now()}_${userName.replace(/[\/\\:*?"<>|\s]/g, '_')}.wav`);
 		fs.writeFileSync(f, wav);
 		log(`[debug] ${userName} ${sec.toFixed(1)}s → ${path.basename(f)}`);
 	}
@@ -120,6 +124,17 @@ async function captureOne(receiver, userId, guildId) {
 		wav_b64: wav.toString('base64'),
 	});
 	log(`收到 ${userName} 講話 ${sec.toFixed(1)}s${ok ? ' → 已送 Godot' : ' (Godot 未連線,丟棄)'}`);
+}
+
+function sendJoined() {
+	if (!currentChannel) return;
+	sendToGodot({
+		type: 'joined',
+		guild_id: currentChannel.guildId,
+		channel_id: currentChannel.channelId,
+		invoker_name: currentChannel.invokerName,
+		invoker_id: currentChannel.invokerId,
+	});
 }
 
 function ensurePlayer(connection) {
@@ -147,9 +162,10 @@ function drainQueue() {
 		inputType: StreamType.Arbitrary,
 	});
 	player.play(resource);
+	log(`播放 Doro 的聲音 ${wav.length} bytes(佇列剩 ${playQueue.length})`);
 }
 
-async function joinChannel(guildId, channelId, adapterCreator) {
+async function joinChannel(guildId, channelId, adapterCreator, invoker = null) {
 	const existing = getVoiceConnection(guildId);
 	if (existing) existing.destroy();
 	player = null;
@@ -164,7 +180,12 @@ async function joinChannel(guildId, channelId, adapterCreator) {
 	await entersState(connection, VoiceConnectionStatus.Ready, 20_000);
 	ensurePlayer(connection);
 	attachReceiver(connection, guildId);
-	sendToGodot({ type: 'joined', guild_id: guildId, channel_id: channelId });
+	currentChannel = {
+		guildId, channelId,
+		invokerName: invoker?.name || '',
+		invokerId: invoker?.id || '',
+	};
+	sendJoined();
 	log(`已加入語音頻道 ${channelId}`);
 	return connection;
 }
@@ -196,6 +217,7 @@ client.on(Events.InteractionCreate, async (itr) => {
 	if (sub === 'leave') {
 		const conn = getVoiceConnection(itr.guildId);
 		if (conn) conn.destroy();
+		currentChannel = null;
 		sendToGodot({ type: 'left' });
 		await itr.reply({ content: 'Doro 走了。', ephemeral: true });
 		return;
@@ -206,7 +228,10 @@ client.on(Events.InteractionCreate, async (itr) => {
 		return;
 	}
 	try {
-		await joinChannel(ch.guild.id, ch.id, ch.guild.voiceAdapterCreator);
+		await joinChannel(ch.guild.id, ch.id, ch.guild.voiceAdapterCreator, {
+			name: itr.member.displayName || itr.user.username,
+			id: itr.user.id,
+		});
 		await itr.reply({ content: `Doro 進來了(${ch.name})。`, ephemeral: true });
 	} catch (e) {
 		log('加入失敗', e.message);
@@ -218,6 +243,7 @@ client.on(Events.InteractionCreate, async (itr) => {
 client.on(Events.VoiceStateUpdate, async (oldS, newS) => {
 	if (newS.member?.id !== client.user?.id) return;
 	if (!newS.channelId) {
+		currentChannel = null;
 		sendToGodot({ type: 'left' });
 		log('被移出語音頻道');
 		return;
@@ -225,7 +251,8 @@ client.on(Events.VoiceStateUpdate, async (oldS, newS) => {
 	if (oldS.channelId && oldS.channelId !== newS.channelId) {
 		log(`被移動到 ${newS.channelId},跟著走`);
 		try {
-			await joinChannel(newS.guild.id, newS.channelId, newS.guild.voiceAdapterCreator);
+			await joinChannel(newS.guild.id, newS.channelId, newS.guild.voiceAdapterCreator,
+				currentChannel ? { name: currentChannel.invokerName, id: currentChannel.invokerId } : null);
 		} catch (e) {
 			log('跟隨失敗', e.message);
 		}
@@ -260,6 +287,10 @@ wss.on('connection', (ws) => {
 	bridge = ws;
 	log('Godot 已連線');
 	ws.send(JSON.stringify({ type: 'ready', logged_in: loggedIn }));
+	if (currentChannel) {
+		sendJoined();   // Godot 重啟後補發,不然它不知道 bot 還在頻道裡
+		log('補發頻道狀態給重連的 Godot');
+	}
 	ws.on('message', (raw) => {
 		let msg;
 		try { msg = JSON.parse(raw.toString()); } catch { return; }

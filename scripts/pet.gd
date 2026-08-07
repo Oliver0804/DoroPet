@@ -1812,17 +1812,38 @@ func _on_discord_bridge(up: bool) -> void:
 ## 主人自己也在頻道裡、也在這台電腦前 —— 本地喇叭照播的話,主人的 DC 麥克風
 ## 會把 Doro 收進頻道(大家聽到兩次);本地常駐聽照開的話,主人講一句會被
 ## 本地麥克風和 DC 收音各收一次,變成兩輪對話
-func _on_discord_channel_state(in_channel: bool) -> void:
+func _on_discord_channel_state(in_channel: bool, invoker_name: String) -> void:
 	if in_channel:
-		_enter_discord_mode()
+		_enter_discord_mode(invoker_name)
 	else:
 		_leave_discord_mode()
 
-func _enter_discord_mode() -> void:
+## 告訴 Doro 現在的場合。沒這段的話牠會把說話者前綴「小芸蟲:」
+## 當成主人改了自稱,回一句「小芸蟲是誰啊?你怎麼突然換稱呼」
+func _discord_context_note(invoker_name: String) -> String:
+	var who: String = invoker_name.strip_edges()
+	var owner_line: String = ""
+	if who != "":
+		owner_line = "主人在這個頻道裡的名字是「%s」——看到這個名字就是主人在跟你講話。\n" % who
+	return """# 現在的場合:Discord 語音頻道
+你不在主人的桌面,你在一個 Discord 語音頻道裡,現場**不只主人一個人**。
+
+每句話的格式是「名字:內容」,冒號前面那個是**說話者的 Discord 名稱**,
+不是主人改了自稱,也不是對話內容的一部分。看到不認識的名字就是頻道裡的其他人。
+%s
+- 對主人:照你原本的人設,該嗆就嗆
+- 對其他人:可以耍脾氣但收斂一點,他們不是你主人,別對他們擺出對主人那種黏人或吃醋的態度
+- 有人問你是誰:你是主人的桌寵,被叫進來一起聊天的
+- **回話時不要自己加「名字:」前綴**,那是輸入格式,不是你要講的話
+- 你聽到的是語音轉文字,錯字漏字很正常,聽不懂就直接問""" % owner_line
+
+func _enter_discord_mode(invoker_name: String = "") -> void:
 	if _voice == null:
 		return
+	if _chat != null:
+		_chat.call("set_context_note", _discord_context_note(invoker_name))
 	if bool(_voice.call("is_tts_sink_external")):
-		return                      ## 已經在 DC 模式
+		return                      ## 已經在 DC 模式(但上面的註記仍要更新)
 	_discord_prev_always_listen = _always_listening
 	if _always_listening:
 		_always_listening = false
@@ -1833,6 +1854,8 @@ func _enter_discord_mode() -> void:
 	_show_bubble("🎧 Doro 進語音頻道了", 3.0)
 
 func _leave_discord_mode() -> void:
+	if _chat != null:
+		_chat.call("set_context_note", "")   ## 回到主人桌面的情境
 	if _voice == null or not bool(_voice.call("is_tts_sink_external")):
 		return
 	_voice.call("set_tts_sink_external", false)

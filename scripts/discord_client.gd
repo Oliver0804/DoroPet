@@ -13,7 +13,7 @@ extends Node
 signal speech_recognized(text: String, user_name: String)  ## 已過回音+熱詞閘門
 signal bridge_connected(up: bool)
 signal login_result(ok: bool, detail: String)
-signal channel_state(in_channel: bool)
+signal channel_state(in_channel: bool, invoker_name: String)
 
 const DoroLogger := preload("res://scripts/logger.gd")
 const ByteplusSTT := preload("res://scripts/byteplus_stt.gd")
@@ -29,6 +29,7 @@ var _url: String = DEFAULT_URL
 var _token: String = ""       ## bot token,連上 sidecar 後轉交給它登入
 var _enabled: bool = false
 var _in_channel: bool = false
+var _invoker: String = ""     ## 打 /doro join 把 Doro 叫進來的人 = 主人
 var _reconnect_at_ms: int = 0
 var _was_open: bool = false
 
@@ -92,6 +93,10 @@ func is_enabled() -> bool:
 func is_in_channel() -> bool:
 	return _enabled and _in_channel
 
+## 誰把 Doro 叫進頻道的(視為主人)
+func get_invoker() -> String:
+	return _invoker
+
 ## 開:開始連 sidecar。關:斷線並清空待辨識佇列
 func set_enabled(on: bool) -> void:
 	if _enabled == on:
@@ -107,7 +112,8 @@ func set_enabled(on: bool) -> void:
 		_queue.clear()
 		_stt_busy = false
 		_in_channel = false
-		channel_state.emit(false)
+		_invoker = ""
+		channel_state.emit(false, "")
 	DoroLogger.log("discord_enabled", {"on": on, "url": _url})
 
 func _connect_now() -> void:
@@ -155,7 +161,8 @@ func _process(_dt: float) -> void:
 			"code": _ws.get_close_code(), "reason": _ws.get_close_reason()})
 		_close()
 		_in_channel = false
-		channel_state.emit(false)
+		_invoker = ""
+		channel_state.emit(false, "")
 		_schedule_reconnect()
 
 func _handle_packet(raw: PackedByteArray) -> void:
@@ -178,12 +185,15 @@ func _handle_packet(raw: PackedByteArray) -> void:
 			login_result.emit(ok, String(d.get("bot", "")) if ok else String(d.get("error", "")))
 		"joined":
 			_in_channel = true
-			channel_state.emit(true)
-			DoroLogger.log("discord_joined", {"channel": String(d.get("channel_id", ""))})
+			_invoker = String(d.get("invoker_name", ""))
+			channel_state.emit(true, _invoker)
+			DoroLogger.log("discord_joined", {
+				"channel": String(d.get("channel_id", "")), "invoker": _invoker})
 		"left":
 			_in_channel = false
+			_invoker = ""
 			_queue.clear()
-			channel_state.emit(false)
+			channel_state.emit(false, "")
 			DoroLogger.log("discord_left", {})
 		"speech":
 			_enqueue_speech(d)

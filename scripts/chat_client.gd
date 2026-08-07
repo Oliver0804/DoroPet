@@ -225,6 +225,10 @@ var _api_key: String = ""
 var _model: String = DEFAULT_MODEL
 var _distill_model: String = ""            ## 記憶蒸餾用 model;空 = 跟 _model 同
 var _persona: String = DEFAULT_PERSONA
+## 場合註記:接在人設後面,說明「現在是什麼場合」。
+## 平常是空的(就是主人的桌面);進 Discord 語音頻道時由 pet.gd 填,
+## 不然 Doro 會把說話者前綴「小芸蟲:」當成主人改自稱
+var _context_note: String = ""
 var _in_flight: bool = false
 var _request_started_ms: int = 0
 var _round: int = 0
@@ -299,6 +303,13 @@ func get_distill_model() -> String:
 
 func get_persona() -> String:
 	return _persona
+
+## 設定場合註記(空字串 = 回到預設的「主人桌面」情境)
+func set_context_note(s: String) -> void:
+	_context_note = ("\n\n" + s.strip_edges()) if s.strip_edges() != "" else ""
+
+func get_context_note() -> String:
+	return _context_note
 
 func _ready() -> void:
 	_api_key = OS.get_environment("OPENROUTER_API_KEY")
@@ -462,8 +473,8 @@ func send(user_text: String, image_b64: String = "", meta: String = "") -> void:
 	var mood_ctx: String = String(_mood.call("prompt_line")) if _mood != null else ""
 	var style_ctx: String = _build_style_context(3)
 	var summary_ctx: String = String(_mem.call("summary_section"))
-	var full_system: String = _persona.strip_edges() + time_ctx + mood_ctx + style_ctx \
-		+ summary_ctx + String(_mem.call("memory_section")) + "\n" + SYSTEM_RULES
+	var full_system: String = _persona.strip_edges() + _context_note + time_ctx + mood_ctx \
+		+ style_ctx + summary_ctx + String(_mem.call("memory_section")) + "\n" + SYSTEM_RULES
 	var messages: Array = [{"role": "system", "content": full_system}]
 	## 送 API 前 strip 掉自加的 ts/meta(OpenAI 兼容 API 只吃 role/content/tool_*)
 	if image_b64 == "":
