@@ -831,6 +831,11 @@ func _cleanup_tray() -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST or what == NOTIFICATION_PREDELETE:
 		_cleanup_tray()
+		## 我們自己啟動的 sidecar 要跟著收掉。這是第二道:
+		## discord_client 的 _exit_tree 是第一道,sidecar 自己的失聯逾時是最後一道
+		## (涵蓋 SIGKILL / 當機這種來不及清理的狀況)
+		if _discord != null:
+			_discord.call("_kill_sidecar")
 
 func _cycle_expression() -> void:
 	if _expression_ids.is_empty() or model == null:
@@ -1804,6 +1809,7 @@ func _toggle_discord() -> void:
 	var on: bool = not bool(_discord.call("is_enabled"))
 	_discord.call("set_enabled", on)
 	_menu.set_item_checked(_menu.get_item_index(45), on)
+	_save_config()   ## 當下就存,不然下次開機還原到的是「上次剛好存檔時」的狀態
 	if on:
 		_show_bubble("🎧 連 Discord 橋接中…\n(要先跑 scripts_sh/04_discord.sh)", 4.0)
 	else:

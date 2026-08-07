@@ -52,11 +52,20 @@ Discord 不會把 bot 自己的聲音回傳給它,本地那套 filler 回音防�
 ### 3. 跑起來
 
 ```bash
-./scripts_sh/04_discord.sh           # 啟動 sidecar
-./scripts_sh/04_discord.sh --debug   # 順便把收到的每句話存成 wav
+./scripts_sh/03_run.sh
 ```
 
-然後開 DoroPet,右鍵選單勾 **🎧 Discord 語音**。
+就這樣 —— 右鍵選單勾 **🎧 Discord 語音**,Doro 會自己把 sidecar 拉起來
+(找不到 8765 埠上的 sidecar 就 spawn 一個),sidecar 的輸出寫到
+`user://logs/discord_bridge.log`。開關狀態會記住,下次開機自動接回。
+
+想自己盯著 sidecar 的即時輸出、或要 debug 收音,才需要手動跑:
+
+```bash
+./scripts_sh/04_discord.sh --debug   # 把收到的每句話存成 wav
+```
+
+手動跑的話 Doro 會直接接上去,不會重複啟動。
 
 最後在 Discord 語音頻道裡打 `/doro join`(要先自己在語音頻道裡)。
 `/doro leave` 讓牠出去。

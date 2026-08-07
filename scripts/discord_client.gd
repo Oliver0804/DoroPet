@@ -1,8 +1,10 @@
 extends Node
 ## Discord 語音橋的 Godot 端
 ##
-## 對面是 discord_bridge/index.js(Node sidecar,手動啟動)。它負責 Discord 那一側,
+## 對面是 discord_bridge/index.js(Node sidecar)。它負責 Discord 那一側,
 ## 這邊只做三件事:收 wav → STT → 過閘門 → 丟給 chat_client;以及把 TTS wav 送回去。
+##
+## sidecar 由這邊自動拉起(連不上就 spawn),你手動跑的話會直接接上去不重複啟動。
 ##
 ## 設計取捨:
 ## - STT 序列化排隊。byteplus_stt.start() 開頭就 cancel(),同時跑會互相取消,
@@ -32,6 +34,8 @@ var _in_channel: bool = false
 var _invoker: String = ""     ## 打 /doro join 把 Doro 叫進來的人 = 主人
 var _reconnect_at_ms: int = 0
 var _was_open: bool = false
+var _sidecar_pid: int = -1        ## 我們自己啟動的 sidecar(手動啟動的不歸我們管)
+var _spawn_tried: bool = false    ## 一輪 enable 只嘗試自動啟動一次,免得連不上就狂 spawn
 
 var _stt: Node = null
 var _queue: Array = []              ## [{wav: PackedByteArray, user_name: String}]
@@ -40,6 +44,9 @@ var _cur_user: String = ""
 
 var _hotwords: PackedStringArray = []
 var _voice: Node = null             ## 借它的 _match_recent_spoken 擋跨網路回音
+
+func _exit_tree() -> void:
+	_kill_sidecar()
 
 func _ready() -> void:
 	## 跟著 _enabled 走,不要硬關:節點加到「還沒 ready 的父節點」時 _ready 會延後,
@@ -104,10 +111,12 @@ func set_enabled(on: bool) -> void:
 	_enabled = on
 	if on:
 		_reconnect_at_ms = 0
+		_spawn_tried = false
 		set_process(true)
 		_connect_now()
 	else:
 		_close()
+		_kill_sidecar()
 		set_process(false)
 		_queue.clear()
 		_stt_busy = false
@@ -115,6 +124,75 @@ func set_enabled(on: bool) -> void:
 		_invoker = ""
 		channel_state.emit(false, "")
 	DoroLogger.log("discord_enabled", {"on": on, "url": _url})
+
+## ---------- 自動啟動 sidecar ----------
+## 連不上就自己把 sidecar 拉起來,省得每次都要開終端機跑腳本。
+## 已經有人在跑(你手動啟動的)就直接接上去,不會重複啟動。
+const NODE_CANDIDATES: PackedStringArray = [
+	"/opt/homebrew/bin/node", "/usr/local/bin/node", "/usr/bin/node",
+	"/opt/homebrew/opt/node/bin/node",
+]
+
+func _find_node() -> String:
+	for p in NODE_CANDIDATES:
+		if FileAccess.file_exists(p):
+			return p
+	## 不在常見位置 → 問 shell(login shell 才吃得到 nvm/homebrew 的 PATH)
+	var out: Array = []
+	if OS.execute("/bin/bash", ["-lc", "command -v node"], out, false) == 0 and out.size() > 0:
+		var p2: String = String(out[0]).strip_edges()
+		if p2 != "" and FileAccess.file_exists(p2):
+			return p2
+	return ""
+
+## 回傳 sidecar 的 index.js 絕對路徑;找不到回 ""(export 版不含 discord_bridge/)
+func _sidecar_script() -> String:
+	var p: String = ProjectSettings.globalize_path("res://discord_bridge/index.js")
+	return p if FileAccess.file_exists(p) else ""
+
+func _spawn_sidecar() -> bool:
+	if _spawn_tried:
+		return false
+	_spawn_tried = true
+	var script: String = _sidecar_script()
+	if script == "":
+		DoroLogger.log("discord_spawn_skip", {"reason": "找不到 discord_bridge/index.js"})
+		return false
+	var node_bin: String = _find_node()
+	if node_bin == "":
+		DoroLogger.log("discord_spawn_skip", {"reason": "找不到 node"})
+		return false
+	var dir: String = script.get_base_dir()
+	if not DirAccess.dir_exists_absolute(dir.path_join("node_modules")):
+		DoroLogger.log("discord_spawn_skip", {"reason": "沒裝依賴,先跑 npm install"})
+		return false
+	var log_path: String = ProjectSettings.globalize_path("user://logs/discord_bridge.log")
+	## 走 bash 是為了設環境變數 + 把 sidecar 的輸出留下來(出事才查得到)。
+	## 結尾一定要 exec:不然 bash 會 fork 出 node 自己在旁邊等,
+	## OS.kill 拿到的是 bash 的 pid,殺了 bash 但 node 活著變孤兒
+	var cmd: String = "cd %s && export DORO_BRIDGE_AUTO=1 DORO_BRIDGE_PORT=%s && exec %s index.js >> %s 2>&1" % [
+		_sh_quote(dir), _sh_quote(_port_of(_url)), _sh_quote(node_bin), _sh_quote(log_path)]
+	var pid: int = OS.create_process("/bin/bash", ["-c", cmd])
+	if pid <= 0:
+		DoroLogger.log("discord_spawn_fail", {"node": node_bin})
+		return false
+	_sidecar_pid = pid
+	DoroLogger.log("discord_spawn", {"pid": pid, "node": node_bin, "log": log_path})
+	return true
+
+func _kill_sidecar() -> void:
+	if _sidecar_pid <= 0:
+		return
+	OS.kill(_sidecar_pid)
+	DoroLogger.log("discord_spawn_kill", {"pid": _sidecar_pid})
+	_sidecar_pid = -1
+
+static func _sh_quote(s: String) -> String:
+	return "'" + s.replace("'", "'\\''") + "'"
+
+static func _port_of(u: String) -> String:
+	var parts: PackedStringArray = u.split(":")
+	return parts[parts.size() - 1].strip_edges() if parts.size() >= 3 else "8765"
 
 func _connect_now() -> void:
 	_ws = WebSocketPeer.new()
@@ -124,6 +202,7 @@ func _connect_now() -> void:
 	if err != OK:
 		DoroLogger.log("discord_ws_error", {"stage": "connect", "err": err})
 		_ws = null
+		_spawn_sidecar()      ## 多半是沒人在 listen → 自己把它拉起來
 		_schedule_reconnect()
 
 func _close() -> void:
@@ -159,6 +238,9 @@ func _process(_dt: float) -> void:
 	elif st == WebSocketPeer.STATE_CLOSED:
 		DoroLogger.log("discord_bridge_down", {
 			"code": _ws.get_close_code(), "reason": _ws.get_close_reason()})
+		## 從沒連上過就斷 = sidecar 根本沒跑 → 自動啟動一次
+		if not _was_open:
+			_spawn_sidecar()
 		_close()
 		_in_channel = false
 		_invoker = ""

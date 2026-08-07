@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # 啟動 Discord 語音橋 sidecar
 #
-# 這支跟 DoroPet 是兩個獨立進程:先跑這支,再在 Doro 選單勾「🎧 Discord 語音」。
-# 分開跑是刻意的——讓 Godot spawn node 會留孤兒進程,而且看不到 sidecar 的 log。
+# 平常不用跑這支 —— Doro 勾了「🎧 Discord 語音」會自己把 sidecar 拉起來。
+# 這支是給你想盯即時輸出、或要 --debug 存收音 wav 的時候用的。
+# 手動跑的話 Doro 會直接接上去,不會重複啟動。
 #
 # 需要的環境變數(放 ~/.doropet.env):
 #   DISCORD_BOT_TOKEN=xxx   (選用 —— 也可以改從 Doro 設定視窗填)

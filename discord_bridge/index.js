@@ -32,6 +32,10 @@ const HERE = path.dirname(fileURLToPath(import.meta.url));
 const TOKEN = process.env.DISCORD_BOT_TOKEN || '';
 const WS_PORT = Number(process.env.DORO_BRIDGE_PORT || 8765);
 const DEBUG_DUMP = process.env.DORO_BRIDGE_DEBUG === '1';
+// 由 Doro 自己啟動的(而不是你手動跑的)。這種進程沒人幫它收屍 ——
+// Godot 若崩潰來不及 kill,它就變孤兒佔著埠。所以失聯太久就自己退出。
+const AUTO_MODE = process.env.DORO_BRIDGE_AUTO === '1';
+const AUTO_EXIT_MS = 90_000;
 
 const SILENCE_MS = 800;          // 停頓多久算一句講完
 // 比這短的當雜訊丟掉。實測 0.4 太寬鬆:呼吸聲、鍵盤聲、椅子聲都過得去,
@@ -262,6 +266,24 @@ client.on(Events.VoiceStateUpdate, async (oldS, newS) => {
 	}
 });
 
+// ---------- 孤兒自清 ----------
+// 只在 AUTO_MODE 生效。手動啟動的 sidecar 不該因為你關掉 Doro 就消失。
+let lastSeenGodot = Date.now();
+if (AUTO_MODE) {
+	setInterval(() => {
+		if (bridge && bridge.readyState === 1) {
+			lastSeenGodot = Date.now();
+			return;
+		}
+		if (Date.now() - lastSeenGodot > AUTO_EXIT_MS) {
+			log(`Doro 失聯超過 ${AUTO_EXIT_MS / 1000} 秒,自動退出(避免變孤兒進程)`);
+			for (const g of client.guilds.cache.values()) getVoiceConnection(g.id)?.destroy();
+			client.destroy();
+			process.exit(0);
+		}
+	}, 5000).unref();
+}
+
 // ---------- 登入 ----------
 // token 可能來自環境變數,也可能是 Godot 從設定視窗送過來的。
 // sidecar 是獨立進程讀不到 Godot 的設定檔,所以走 WS 傳。
@@ -288,6 +310,7 @@ const wss = new WebSocketServer({ host: '127.0.0.1', port: WS_PORT });
 wss.on('connection', (ws) => {
 	if (bridge && bridge.readyState === 1) bridge.close();
 	bridge = ws;
+	lastSeenGodot = Date.now();
 	log('Godot 已連線');
 	ws.send(JSON.stringify({ type: 'ready', logged_in: loggedIn }));
 	if (currentChannel) {
