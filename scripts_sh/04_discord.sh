@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# 啟動 Discord 語音橋 sidecar
+#
+# 這支跟 DoroPet 是兩個獨立進程:先跑這支,再在 Doro 選單勾「🎧 Discord 語音」。
+# 分開跑是刻意的——讓 Godot spawn node 會留孤兒進程,而且看不到 sidecar 的 log。
+#
+# 需要的環境變數(放 ~/.doropet.env):
+#   DISCORD_BOT_TOKEN=xxx
+#
+# Bot 怎麼建:
+#   1. https://discord.com/developers/applications → New Application
+#   2. Bot 頁籤 → Reset Token 拿 token
+#   3. OAuth2 → URL Generator → scopes 勾 bot + applications.commands
+#      → Bot Permissions 勾 Connect / Speak / Use Voice Activity
+#      → 用產生的網址把 bot 邀進伺服器
+#   4. 跑這支腳本,然後在 Discord 語音頻道裡打 /doro join
+#
+# 選項:
+#   --debug   把收到的每句話存成 wav 到 discord_bridge/debug/
+#             (不用開 Doro 就能單獨驗收音通不通)
+
+set -euo pipefail
+PROJ_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BRIDGE_DIR="$PROJ_ROOT/discord_bridge"
+
+[[ -f "$HOME/.doropet.env" ]] && source "$HOME/.doropet.env"
+
+if [[ -z "${DISCORD_BOT_TOKEN:-}" ]]; then
+  echo "❌ 沒設 DISCORD_BOT_TOKEN" >&2
+  echo "   echo 'export DISCORD_BOT_TOKEN=你的token' >> ~/.doropet.env" >&2
+  exit 1
+fi
+
+if ! command -v node >/dev/null 2>&1; then
+  echo "❌ 找不到 node(需要 18 以上)" >&2
+  exit 1
+fi
+
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  echo "❌ 找不到 ffmpeg(收音要靠它做 48k stereo → 16k mono 重採樣)" >&2
+  echo "   brew install ffmpeg" >&2
+  exit 1
+fi
+
+if [[ ! -d "$BRIDGE_DIR/node_modules" ]]; then
+  echo "首次執行,安裝依賴中…"
+  (cd "$BRIDGE_DIR" && npm install)
+fi
+
+export DISCORD_BOT_TOKEN
+export DORO_BRIDGE_PORT="${DORO_BRIDGE_PORT:-8765}"
+if [[ "${1:-}" == "--debug" ]]; then
+  export DORO_BRIDGE_DEBUG=1
+  echo "DEBUG 模式:收到的每句話會存進 discord_bridge/debug/"
+fi
+
+cd "$BRIDGE_DIR"
+exec node index.js

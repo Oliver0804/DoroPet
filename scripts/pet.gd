@@ -94,6 +94,7 @@ var _setting_auto_emo: bool = false        ## 標記目前 _set_emotion 是否�
 const ChatClient := preload("res://scripts/chat_client.gd")
 const SettingsDialog := preload("res://scripts/settings_dialog.gd")
 const VoiceClient := preload("res://scripts/voice_client.gd")
+const DiscordClient := preload("res://scripts/discord_client.gd")
 const LogsViewer := preload("res://scripts/logs_viewer.gd")
 const Updater := preload("res://scripts/updater.gd")
 const DoroLogger := preload("res://scripts/logger.gd")
@@ -138,6 +139,8 @@ var _tray_id: int = -1
 var _tray_menu: PopupMenu
 var _hidden: bool = false
 var _chat: Node                            ## ChatClient 實例
+var _discord: Node                         ## DiscordClient(語音橋,預設關)
+var _discord_prev_always_listen: bool = false  ## 進 DC 頻道前的常駐聽狀態,離開時還原
 var _voice: Node                           ## VoiceClient 實例
 var _bubble_window: Window                 ## 浮在 Doro 頭頂的對話氣泡（獨立視窗）
 var _bubble: PanelContainer
@@ -764,6 +767,8 @@ func _build_menu() -> void:
 	_menu.add_item("⬆ 拉回最上層", 44)
 	_menu.add_check_item("🎤 隨時聽(常駐 STT)", 43)
 	_menu.set_item_checked(_menu.get_item_index(43), _always_listening)
+	_menu.add_check_item("🎧 Discord 語音", 45)
+	_menu.set_item_checked(_menu.get_item_index(45), false)
 	_menu.add_item("🔍 Debug 上下文", 42)
 	_menu.add_item("檢查更新 (v%s)" % Updater.current_version(), 41)
 	_menu.add_separator()
@@ -800,6 +805,8 @@ func _on_menu(id: int) -> void:
 			_open_context_debug()
 		43:
 			_toggle_always_listening()
+		45:
+			_toggle_discord()
 		44:
 			_reapply_always_on_top(true)
 		41:
@@ -1197,6 +1204,18 @@ func _build_chat_ui() -> void:
 	_voice.call("set_bp_access_token", _config_get("voice", "bp_access_token", ""))
 	_voice.call("set_bp_cluster", _config_get("voice", "bp_cluster", ""))
 	_voice.call("set_bp_speaker", _config_get("voice", "bp_speaker", ""))
+	## Discord 語音橋:預設關,從選單開。開了才會去連 sidecar
+	_discord = DiscordClient.new()
+	_discord.name = "DiscordClient"
+	add_child(_discord)
+	_discord.call("setup", _voice,
+		_config_get("voice", "bp_asr_key", ""),
+		_config_get("voice", "stt_hotwords", ""))
+	_discord.connect("speech_recognized", _on_discord_speech)
+	_discord.connect("channel_state", _on_discord_channel_state)
+	_discord.connect("bridge_connected", _on_discord_bridge)
+	_voice.connect("tts_wav_ready", _on_tts_wav_for_discord)
+
 	_voice.call("set_bp_asr_key", _config_get("voice", "bp_asr_key", ""))
 	_voice.call("set_capture_system_audio", bool(_config_get("voice", "capture_system_audio", false)))
 	_voice.call("set_stt_hotwords", _config_get("voice", "stt_hotwords", ""))
@@ -1766,6 +1785,71 @@ func _on_voice_transcribed(text: String) -> void:
 		## 非連續模式:5 秒沒下一輪才關
 		if not _continuous_voice:
 			_start_input_idle_timer()
+
+## ---------- Discord 語音橋 ----------
+func _toggle_discord() -> void:
+	if _discord == null:
+		return
+	var on: bool = not bool(_discord.call("is_enabled"))
+	_discord.call("set_enabled", on)
+	_menu.set_item_checked(_menu.get_item_index(45), on)
+	if on:
+		_show_bubble("🎧 連 Discord 橋接中…\n(要先跑 scripts_sh/04_discord.sh)", 4.0)
+	else:
+		_leave_discord_mode()
+		_show_bubble("🎧 Discord 關了", 2.0)
+
+func _on_discord_bridge(up: bool) -> void:
+	if not up and _discord != null and bool(_discord.call("is_enabled")):
+		_show_bubble("🎧 橋接斷了,重連中…", 2.5)
+		_leave_discord_mode()
+	elif up:
+		_show_bubble("🎧 橋接上了,在 DC 打 /doro join 叫我", 4.0)
+
+## 進出頻道時切換音訊路由。這兩件事是必要的不是選配:
+## 主人自己也在頻道裡、也在這台電腦前 —— 本地喇叭照播的話,主人的 DC 麥克風
+## 會把 Doro 收進頻道(大家聽到兩次);本地常駐聽照開的話,主人講一句會被
+## 本地麥克風和 DC 收音各收一次,變成兩輪對話
+func _on_discord_channel_state(in_channel: bool) -> void:
+	if in_channel:
+		_enter_discord_mode()
+	else:
+		_leave_discord_mode()
+
+func _enter_discord_mode() -> void:
+	if _voice == null:
+		return
+	if bool(_voice.call("is_tts_sink_external")):
+		return                      ## 已經在 DC 模式
+	_discord_prev_always_listen = _always_listening
+	if _always_listening:
+		_always_listening = false
+		_menu.set_item_checked(_menu.get_item_index(43), false)
+		_apply_always_listening()
+	_voice.call("set_tts_sink_external", true)
+	DoroLogger.log("discord_mode", {"on": true, "was_always_listening": _discord_prev_always_listen})
+	_show_bubble("🎧 Doro 進語音頻道了", 3.0)
+
+func _leave_discord_mode() -> void:
+	if _voice == null or not bool(_voice.call("is_tts_sink_external")):
+		return
+	_voice.call("set_tts_sink_external", false)
+	if _discord_prev_always_listen and not _always_listening:
+		_always_listening = true
+		_menu.set_item_checked(_menu.get_item_index(43), true)
+		_apply_always_listening()
+	_discord_prev_always_listen = false
+	DoroLogger.log("discord_mode", {"on": false})
+
+## 頻道裡有人叫 Doro(已過回音檢查+熱詞閘門)。
+## 帶說話者名字進去,不然多人頻道裡 Doro 分不出誰是誰
+func _on_discord_speech(text: String, user_name: String) -> void:
+	_on_voice_transcribed("%s:%s" % [user_name, text])
+
+## Doro 的 TTS wav → 送進語音頻道
+func _on_tts_wav_for_discord(wav: PackedByteArray) -> void:
+	if _discord != null:
+		_discord.call("send_tts_wav", wav)
 
 func _on_voice_error(reason: String) -> void:
 	_end_thinking()

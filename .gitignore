@@ -28,3 +28,7 @@ windows-build/
 build/
 *.zip
 macos-build/
+
+# Discord 語音橋
+discord_bridge/node_modules/
+discord_bridge/debug/

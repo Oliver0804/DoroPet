@@ -77,6 +77,31 @@ const FILLER_PHRASES: PackedStringArray = [
 	"嗯嗯?", "唔...讓我想想喔", "欸,等一下下喔", "讓Doro想一下下~"]
 var _filler_capture_path: String = ""    ## 非空 = 下一個生成的 wav 要複製進 filler cache
 var _filler_player: AudioStreamPlayer    ## cached filler 用獨立 player,不觸發 speaking signals
+## ---------- TTS 出口(sink)----------
+## 預設走本機喇叭。Discord 模式改成把 wav bytes 丟出去,由 discord_client 送進頻道。
+## 切在這裡而不是另起一條管線:斷句、佇列、filler 這些邏輯全部原封不動複用。
+signal tts_wav_ready(wav: PackedByteArray)
+var _tts_sink_external: bool = false
+func set_tts_sink_external(on: bool) -> void:
+	_tts_sink_external = on
+func is_tts_sink_external() -> bool:
+	return _tts_sink_external
+
+## 讀出 wav bytes 丟給外部 sink;回傳是否成功送出
+func _emit_wav_to_sink(path: String) -> bool:
+	var abs_path: String = path
+	if path.begins_with("user://") or path.begins_with("res://"):
+		abs_path = ProjectSettings.globalize_path(path)
+	var f: FileAccess = FileAccess.open(abs_path, FileAccess.READ)
+	if f == null:
+		return false
+	var bytes: PackedByteArray = f.get_buffer(f.get_length())
+	f.close()
+	if bytes.is_empty():
+		return false
+	tts_wav_ready.emit(bytes)
+	return true
+
 ## Filler 回音窗:filler 走獨立 player 不算 is_speaking,繞過 barge-in 那層防護,
 ## 而且 ASR 很容易把它誤聽成別的字(實測「讓Doro想一下下~」→「讓都讓下」),
 ## 字面比對擋不住 → 播放期間 + 尾窗內改用寬鬆比對,窗外不受影響。
@@ -906,12 +931,24 @@ func _speak_system(text: String) -> void:
 ## ---------- Voicebox 佇列播放 ----------
 func _on_vb_chunk_ready(path: String, _idx: int) -> void:
 	_maybe_capture_filler(path)
+	if _tts_sink_external:
+		## Discord 模式:本地不播,wav 直接送出去(那端自己有播放佇列)
+		if not _vb_started_emitted:
+			_vb_started_emitted = true
+			speaking_started.emit()
+		_emit_wav_to_sink(path)
+		return
 	_vb_queue.append(path)
 	if not _tts_player.playing:
 		_play_next_vb()
 
 func _on_vb_finished_generating(_ok_count: int) -> void:
 	_vb_generating = false
+	## 外部 sink 沒有本地播放事件可以等,生成完就當講完
+	## (Discord 那端還在排隊播,所以這個 finished 會比實際播完早一點)
+	if _tts_sink_external:
+		_finish_speaking()
+		return
 	## 全生成完且播完 → 收工（邊播邊生成時由 _on_player_finished 收）
 	if _vb_queue.is_empty() and not _tts_player.playing:
 		_finish_speaking()
@@ -976,6 +1013,14 @@ func _tts_thread(text: String, voice: String) -> void:
 
 func _play_tts_file(path: String) -> void:
 	_maybe_capture_filler(path)
+	if _tts_sink_external:
+		## 系統 TTS 走的路徑(API TTS 失敗時的 fallback),同樣改送外部
+		speaking_started.emit()
+		var sent: bool = _emit_wav_to_sink(path)
+		speaking_finished.emit()
+		if not sent:
+			DoroLogger.log("tts_sink_read_fail", {"path": path})
+		return
 	var stream: AudioStreamWAV = _load_wav_as_stream(path)
 	if stream == null:
 		speaking_finished.emit()
