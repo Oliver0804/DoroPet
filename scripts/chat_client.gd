@@ -183,6 +183,8 @@ const TOOLS_SCHEMA: Array = [
 	},
 ]
 const MAX_TOOL_ROUNDS: int = 3              ## 防 LLM 無限呼叫
+## 模型把額度全燒在 reasoning、content 回空時,重送一輪用的放寬額度
+const EMPTY_RETRY_MAX_TOKENS: int = 2500
 
 var _http: HTTPRequest
 var _tool_http: HTTPRequest                ## 給 weather 等 tool 用
@@ -195,6 +197,7 @@ var _persona: String = DEFAULT_PERSONA
 var _in_flight: bool = false
 var _request_started_ms: int = 0
 var _round: int = 0
+var _empty_retried: bool = false           ## 本輪已為「content 空」重送過一次
 var _pending_image_b64: String = ""              ## LLM call take_screenshot 後待塞的圖
 var _mem: Node                                   ## MemoryStore(歷史落盤 + 主人筆記)
 var _mood: Node                                  ## MoodState(愉悅/活力兩軸,持久化)
@@ -450,6 +453,7 @@ func send(user_text: String, image_b64: String = "", meta: String = "") -> void:
 
 	_running_messages = messages
 	_round = 0
+	_empty_retried = false
 	_in_flight = true
 	_request_started_ms = Time.get_ticks_msec()
 	## Debug snapshot
@@ -618,6 +622,9 @@ func _send_round() -> void:
 		## 才開始回答(實測 13.4s→1.2s,10 倍差)。桌寵短回覆不需要深思。
 		"reasoning": {"enabled": false},
 	}
+	## 上一輪 content 回空(reasoning 把額度吃光) → 放寬額度重來一次
+	if _empty_retried:
+		body["max_tokens"] = EMPTY_RETRY_MAX_TOKENS
 	var headers: PackedStringArray = [
 		"Authorization: Bearer " + _api_key,
 		"Content-Type: application/json",
@@ -625,7 +632,8 @@ func _send_round() -> void:
 		"X-Title: DoroPet",
 	]
 	## Stream 條件:enabled + 首輪 + 無圖(multimodal 不好 stream 解析 partial JSON)
-	if _stream_enabled and _round == 0 and not has_image:
+	## 空回覆重試走非串流:路徑短、拿得到完整 finish_reason 好判讀
+	if _stream_enabled and _round == 0 and not has_image and not _empty_retried:
 		body["stream"] = true
 		_start_stream(body, headers)
 		return
@@ -760,7 +768,8 @@ func _handle_stream_delta(chunk: Dictionary) -> void:
 	if delta.has("tool_calls"):
 		_merge_tool_calls(delta["tool_calls"])
 	if delta.has("content"):
-		var c: String = String(delta["content"])
+		## content 可能是 JSON null(純思考的 chunk),_dict_str 吃掉不讓它變殘值
+		var c: String = _dict_str(delta, "content")
 		if c != "":
 			_stream_content_acc += c
 			if not _stream_emo_parsed:
@@ -859,7 +868,7 @@ func _try_parse_non_sse_body(raw: String) -> Dictionary:
 		var choices: Array = parsed["choices"]
 		if choices.size() > 0:
 			var msg: Dictionary = (choices[0] as Dictionary).get("message", {})
-			var content: String = String(msg.get("content", ""))
+			var content: String = _dict_str(msg, "content")
 			if content != "":
 				return _parse_reply_content_json(content)
 	## Case 2: SSE lines 都在 raw 但 line-by-line 之前沒 process 到
@@ -880,13 +889,32 @@ func _try_parse_non_sse_body(raw: String) -> Dictionary:
 			continue
 		var first: Dictionary = ch[0]
 		var delta: Dictionary = first.get("delta", {})
-		if delta.has("content"):
-			concat += String(delta["content"])
-		if first.has("message"):
-			concat += String(first["message"].get("content", ""))
+		concat += _dict_str(delta, "content")
+		if first.has("message") and typeof(first["message"]) == TYPE_DICTIONARY:
+			concat += _dict_str(first["message"], "content")
 	if concat != "":
 		return _parse_reply_content_json(concat)
 	return {}
+
+## Dict 取字串,JSON null / 缺 key / 非字串一律回 fallback。
+## 不能寫 String(d.get(k, "")):思考型模型回 "content": null 時,editor build 會噴
+## 「Invalid call 'String' constructor」直接中斷函式,export(release) build 更糟——
+## 不檢查錯誤,變數拿到暫存器殘值(= 上一個 String,也就是整包 response body),
+## 於是 Doro 把整份 API JSON 當台詞念出來。2026-08-07 就是這樣炸的。
+static func _dict_str(d: Dictionary, key: String, fallback: String = "") -> String:
+	var v: Variant = d.get(key)
+	return v if v is String else fallback
+
+## 回覆內容是不是 API 原始 JSON 漏出來(最後一道防線,不管哪條路徑漏的都攔)
+const JUNK_MARKERS: PackedStringArray = [
+	'"object":"chat.completion"', '"reasoning_details"',
+	'"completion_tokens"', '"finish_reason"', '"prompt_tokens"',
+]
+static func _looks_like_api_junk(s: String) -> bool:
+	for m in JUNK_MARKERS:
+		if s.contains(m):
+			return true
+	return false
 
 ## 把 LLM 產出的 content (應該是 JSON `{"emotion":N,"text":"..."}`) parse 成 dict
 func _parse_reply_content_json(content: String) -> Dictionary:
@@ -965,11 +993,17 @@ func _stream_finish_success() -> void:
 			"raw_head": raw_text.substr(0, 300),
 			"latency_ms": latency_ms})
 		var recovered: Dictionary = _try_parse_non_sse_body(raw_text)
+		## 撈回來的東西若帶 API 欄位特徵(reasoning_details / usage …),
+		## 表示抽錯了段落,寧可當沒救也不要讓 Doro 把 JSON 念出來
+		if _looks_like_api_junk(_dict_str(recovered, "text")):
+			DoroLogger.log("stream_recover_rejected", {
+				"head": _dict_str(recovered, "text").substr(0, 120)})
+			recovered = {}
 		if not recovered.is_empty():
 			DoroLogger.log("stream_recovered_non_sse", {
-				"text_len": String(recovered.get("text", "")).length(),
+				"text_len": _dict_str(recovered, "text").length(),
 				"emotion": int(recovered.get("emotion", 0))})
-			full_text = String(recovered.get("text", ""))
+			full_text = _dict_str(recovered, "text")
 			_stream_emo = int(recovered.get("emotion", 0))
 			## 直接 emit 整段當第一句(不再拆句,免延遲)
 			if full_text != "":
@@ -1065,8 +1099,31 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 		_send_round()
 		return
 	## 無 tool_calls → 一般文字回覆,清 in-flight
+	var reply: String = _dict_str(message, "content")
+	## 空回覆保護:思考型模型(bytedance-seed 等)會把 max_tokens 全燒在 reasoning 上,
+	## 回 content:null + finish_reason:"length"。這輪根本沒台詞,
+	## 既不能 emit(念出髒東西)也不能寫進 _history(污染下一輪 context)。
+	if reply.strip_edges() == "" or _looks_like_api_junk(reply):
+		var choice0: Dictionary = data["choices"][0]
+		var fin: String = _dict_str(choice0, "finish_reason", "?")
+		DoroLogger.log("chat_error", {
+			"reason": "empty content (finish_reason=%s, reasoning=%d字)" % [
+				fin, _dict_str(message, "reasoning").length()],
+			"latency_ms": latency_ms})
+		## 第一次遇到 → 拉高 max_tokens 重送一輪(reasoning 吃掉的額度補回來);
+		## 再空就放棄,讓 UI 顯示錯誤而不是讓 Doro 亂講
+		if not _empty_retried and _round < MAX_TOOL_ROUNDS:
+			_empty_retried = true
+			_request_started_ms = Time.get_ticks_msec()   ## 重新計時,免得 latency log 疊兩輪
+			DoroLogger.log("chat_retry_empty", {"max_tokens": EMPTY_RETRY_MAX_TOKENS})
+			_send_round()
+			return
+		_clear_flight()
+		if not _history.is_empty() and String((_history.back() as Dictionary).get("role", "")) == "user":
+			_history.pop_back()
+		error_occurred.emit("模型沒吐出回覆(finish_reason=%s),再說一次試試" % fin)
+		return
 	_clear_flight()
-	var reply: String = String(message.get("content", ""))
 	_history.append({"role": "assistant", "content": reply,
 		"ts": int(Time.get_unix_time_from_system())})
 	## 落盤 + 累積夠就背景蒸餾(蒸餾可指定較強 model,不影響對話延遲)
@@ -1092,7 +1149,7 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 	_dbg_latency_ms = latency_ms
 	if typeof(obj) == TYPE_DICTIONARY and (obj as Dictionary).has("text"):
 		var emo: int = int((obj as Dictionary).get("emotion", 0))
-		var txt: String = String((obj as Dictionary)["text"]).strip_edges()
+		var txt: String = _dict_str(obj as Dictionary, "text").strip_edges()
 		DoroLogger.log("chat_response", {"text": txt, "emotion": emo, "model": _model, "latency_ms": latency_ms})
 		_dbg_reply_text = txt
 		_dbg_reply_emotion = emo

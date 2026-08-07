@@ -152,7 +152,22 @@ func _llm_summarize_convo(convo: String, api_key: String, model: String) -> Stri
 	var parsed: Variant = JSON.parse_string((result[3] as PackedByteArray).get_string_from_utf8())
 	if typeof(parsed) != TYPE_DICTIONARY or not (parsed as Dictionary).has("choices"):
 		return ""
-	return String(parsed["choices"][0]["message"].get("content", "")).strip_edges()
+	return _choice_content(parsed).strip_edges()
+
+## 從 OpenRouter 回應抽 choices[0].message.content。
+## 思考型模型可能回 content:null,String(null) 在 export build 會拿到暫存器殘值
+## (整包 response body),必須型別檢查後才轉字串。
+static func _choice_content(parsed: Variant) -> String:
+	if typeof(parsed) != TYPE_DICTIONARY:
+		return ""
+	var choices: Array = (parsed as Dictionary).get("choices", [])
+	if choices.is_empty() or typeof(choices[0]) != TYPE_DICTIONARY:
+		return ""
+	var msg: Variant = (choices[0] as Dictionary).get("message")
+	if typeof(msg) != TYPE_DICTIONARY:
+		return ""
+	var c: Variant = (msg as Dictionary).get("content")
+	return c if c is String else ""
 
 ## ---------- 對外:注入 context 的記憶段 ----------
 func get_memory() -> String:
@@ -364,7 +379,7 @@ func _llm_ops(api_key: String, model: String, system_prompt: String, user_msg: S
 	if typeof(parsed) != TYPE_DICTIONARY or not (parsed as Dictionary).has("choices"):
 		DoroLogger.log("memory_distill_error", {"reason": "bad json"})
 		return false
-	var text: String = String(parsed["choices"][0]["message"].get("content", "")).strip_edges()
+	var text: String = _choice_content(parsed).strip_edges()
 	if text.begins_with("```"):
 		text = text.trim_prefix("```json").trim_prefix("```").trim_suffix("```").strip_edges()
 	## 剝掉 array 外的前後綴
