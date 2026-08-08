@@ -1174,13 +1174,57 @@ const MEMORY_FILES: Array = [
 	 "hint": "遷移前的舊格式(僅供對照)"},
 ]
 var _mem_tabs: TabContainer
+var _db: DoroDB = null              ## 由 pet.gd 注入,用來查記憶
+var _search_edit: LineEdit
+var _search_result: RichTextLabel
+var _search_stats: Label
+
+## pet.gd 開好 DB 後傳進來
+func set_db(db: DoroDB) -> void:
+	_db = db
+	_refresh_search_stats()
 var _mem_edits: Array = []
 
 func _open_memory_viewer() -> void:
 	if _memory_viewer == null:
 		_build_memory_viewer()
+	_refresh_search_stats()   ## set_db() 可能在 UI 建好之前就呼叫了,這裡補一次
 	_reload_memory_viewer()
 	_memory_viewer.popup_centered()
+
+func _refresh_search_stats() -> void:
+	if _search_stats == null:
+		return
+	if _db == null or not _db.is_open():
+		_search_stats.text = "資料庫未啟用(godot-sqlite 未安裝),搜尋不可用 —— 其他分頁仍可看原始檔"
+		return
+	var st: Dictionary = _db.stats()
+	_search_stats.text = "事實 %d · 人物記憶 %d · 已歸檔 %d · 對話 %d · 前瞻 %d" % [
+		int(st.get("facts", 0)), int(st.get("people_log", 0)),
+		int(st.get("facts_archive", 0)), int(st.get("history", 0)),
+		int(st.get("followups", 0))]
+
+func _do_search() -> void:
+	if _search_result == null:
+		return
+	if _db == null or not _db.is_open():
+		_search_result.text = "[color=#c66]資料庫未啟用,無法搜尋。[/color]"
+		return
+	var kw: String = _search_edit.text.strip_edges()
+	var hits: Array = _db.search_all(kw)
+	if hits.is_empty():
+		_search_result.text = "[color=#888]查不到「%s」。[/color]" % kw
+		return
+	var colors: Dictionary = {"事實": "#7ec8e3", "人物": "#b5e08c",
+		"已歸檔": "#999999", "對話": "#e0c07e"}
+	var out: String = "[color=#888]找到 %d 筆[/color]\n\n" % hits.size()
+	for h in hits:
+		var src: String = String(h.get("source", ""))
+		out += "[color=%s][%s][/color] [color=#777]%s %s[/color]\n%s\n\n" % [
+			String(colors.get(src, "#aaaaaa")), src,
+			String(h.get("date", "")), String(h.get("extra", "")),
+			String(h.get("text", "")).replace("[", "[lb]")]
+	_search_result.text = out
 
 func _build_memory_viewer() -> void:
 	_memory_viewer = Window.new()
@@ -1201,6 +1245,34 @@ func _build_memory_viewer() -> void:
 	_mem_tabs = TabContainer.new()
 	_mem_tabs.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	vb.add_child(_mem_tabs)
+
+	## --- 搜尋分頁:直接問「Doro 記得什麼」,不用自己猜要翻哪個檔 ---
+	var sp: VBoxContainer = VBoxContainer.new()
+	sp.name = "🔍 搜尋"
+	_search_stats = Label.new()
+	_search_stats.add_theme_color_override("font_color", Color(0.55, 0.55, 0.55))
+	_search_stats.add_theme_font_size_override("font_size", 12)
+	sp.add_child(_search_stats)
+
+	var srow: HBoxContainer = HBoxContainer.new()
+	_search_edit = LineEdit.new()
+	_search_edit.placeholder_text = "輸入關鍵字(人名、事物、話題);留空 = 列出最近的"
+	_search_edit.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_search_edit.text_submitted.connect(func(_t: String) -> void: _do_search())
+	var sbtn: Button = Button.new()
+	sbtn.text = "搜尋"
+	sbtn.pressed.connect(_do_search)
+	srow.add_child(_search_edit)
+	srow.add_child(sbtn)
+	sp.add_child(srow)
+
+	_search_result = RichTextLabel.new()
+	_search_result.bbcode_enabled = true
+	_search_result.selection_enabled = true
+	_search_result.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	_search_result.text = "[color=#888]輸入關鍵字後按 Enter。會一次查事實帳本、人物記憶、已歸檔、對話歷史。[/color]"
+	sp.add_child(_search_result)
+	_mem_tabs.add_child(sp)
 
 	_mem_edits.clear()
 	for i in range(MEMORY_FILES.size()):

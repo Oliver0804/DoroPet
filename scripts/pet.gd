@@ -2016,6 +2016,7 @@ func _open_settings() -> void:
 		_settings.settings_changed.connect(_on_settings_changed)
 		_settings.logs_requested.connect(_open_logs)
 		_settings.memory_file_cleared.connect(_on_memory_file_cleared)
+		_settings.call("set_db", _db)      ## 記憶搜尋要用
 	## 把 voice node 注入,讓 dialog 自己列裝置 / 跑測試 / 顯示 RMS
 	_settings.call("set_voice_node", _voice)
 	var data: Dictionary = {
@@ -2098,6 +2099,8 @@ func _open_context_debug() -> void:
 func _on_memory_file_cleared(path: String) -> void:
 	if path == "user://doro_people_log.jsonl" and _people != null:
 		_people.call("reload")
+	if _settings != null:
+		_settings.call("_refresh_search_stats")
 		DoroLogger.log("people_log_reloaded", {"reason": "cleared from settings"})
 
 func _on_settings_changed(data: Dictionary) -> void:

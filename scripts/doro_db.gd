@@ -108,6 +108,63 @@ func kv_get(key: String, fallback: String = "") -> String:
 func kv_set(key: String, value: String) -> void:
 	q("INSERT INTO kv(k,v) VALUES(?,?) ON CONFLICT(k) DO UPDATE SET v=excluded.v;", [key, value])
 
+## ---------- 跨表搜尋(設定 → 記憶檢視器用)----------
+## 一次問「Doro 到底記得什麼」,不用自己去猜要翻哪張表。
+## 回傳 [{source, text, date, extra}],由新到舊
+func search_all(keyword: String, limit_per_table: int = 40) -> Array:
+	if not _ok:
+		return []
+	var kw: String = "%" + keyword.strip_edges().to_lower() + "%"
+	var out: Array = []
+
+	var facts: Array = q("""SELECT id, type, text, created, updated FROM facts
+		WHERE ? = '%%' OR LOWER(text) LIKE ? ORDER BY updated DESC, id DESC LIMIT ?;""",
+		[kw, kw, limit_per_table])
+	for r in facts:
+		out.append({"source": "事實", "text": String(r["text"]),
+			"date": String(r.get("updated", "")) if String(r.get("updated", "")) != "" else String(r.get("created", "")),
+			"extra": "#%d [%s]" % [int(r["id"]), String(r.get("type", ""))]})
+
+	var ppl: Array = q("""SELECT name, text, ts, by FROM people_log
+		WHERE ? = '%%' OR LOWER(text) LIKE ? OR LOWER(name) LIKE ?
+		ORDER BY ts DESC, id DESC LIMIT ?;""", [kw, kw, kw, limit_per_table])
+	for r in ppl:
+		out.append({"source": "人物", "text": String(r["text"]),
+			"date": _ts_date(int(r.get("ts", 0))),
+			"extra": String(r.get("name", "")) + ("(Doro)" if String(r.get("by", "")) == "doro" else "")})
+
+	var arc: Array = q("""SELECT text, archived, reason FROM facts_archive
+		WHERE ? = '%%' OR LOWER(text) LIKE ? ORDER BY archived DESC LIMIT ?;""",
+		[kw, kw, limit_per_table])
+	for r in arc:
+		out.append({"source": "已歸檔", "text": String(r["text"]),
+			"date": String(r.get("archived", "")), "extra": String(r.get("reason", ""))})
+
+	var his: Array = q("""SELECT role, content, ts FROM history
+		WHERE ? = '%%' OR LOWER(content) LIKE ? ORDER BY ts DESC, id DESC LIMIT ?;""",
+		[kw, kw, limit_per_table])
+	for r in his:
+		out.append({"source": "對話", "text": String(r["content"]),
+			"date": _ts_date(int(r.get("ts", 0))),
+			"extra": "主人" if String(r.get("role", "")) == "user" else "Doro"})
+
+	out.sort_custom(func(a, b): return String(a["date"]) > String(b["date"]))
+	return out
+
+## 各表筆數,給檢視器顯示「記得多少東西」
+func stats() -> Dictionary:
+	var out: Dictionary = {}
+	for t in ["facts", "people_log", "facts_archive", "history", "followups"]:
+		var r: Array = q("SELECT COUNT(*) AS n FROM %s;" % t)
+		out[t] = int(r[0]["n"]) if r.size() > 0 else 0
+	return out
+
+static func _ts_date(ts: int) -> String:
+	if ts <= 0:
+		return ""
+	var d: Dictionary = Time.get_datetime_dict_from_unix_time(ts)
+	return "%04d-%02d-%02d %02d:%02d" % [d.year, d.month, d.day, d.hour, d.minute]
+
 ## ---------- 從舊 jsonl 搬家 ----------
 ## 只搬一次(表空 + 沒搬過)。來源檔原封不動留著 —— 還沒切到 DB 的模組要繼續讀它
 func migrate_from_jsonl() -> Dictionary:
