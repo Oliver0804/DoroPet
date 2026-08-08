@@ -15,10 +15,16 @@ const LOG_PATH: String = "user://doro_people_log.jsonl"
 const MAX_ENTRIES: int = 4000      ## 超過就砍最舊的(一行約 100 bytes,4000 條 ≈ 400KB)
 const TRIM_TO: int = 3000          ## 砍一次就砍到這個量,不要每次都在邊界上重寫檔案
 
-var _entries: Array = []           ## [{uid, name, text, ts, by}]
+var _entries: Array = []           ## jsonl 模式的記憶體快取(DB 模式下不使用)
+var _db: DoroDB = null             ## 有 DB 就走 DB,沒有(GDExtension 缺席)才退回 jsonl
+
+## db 由 pet.gd 開好傳進來 —— 整個 app 共用一個連線
+func setup_db(db: DoroDB) -> void:
+	_db = db if (db != null and db.is_open()) else null
 
 func _ready() -> void:
-	_load()
+	if _db == null:
+		_load()
 
 func _load() -> void:
 	_entries.clear()
@@ -66,6 +72,13 @@ func record(uid: String, name: String, text: String, by: String = "user") -> voi
 		"uid": uid, "name": name, "text": t.substr(0, 300),
 		"ts": int(Time.get_unix_time_from_system()), "by": by,
 	}
+	if _db != null:
+		_db.insert("people_log", e)
+		## 超量才砍,用一句 SQL 就好(不用把整份資料載進記憶體)
+		var c: Array = _db.q("SELECT COUNT(*) AS n FROM people_log;")
+		if c.size() > 0 and int(c[0]["n"]) > MAX_ENTRIES:
+			_db.q("DELETE FROM people_log WHERE id NOT IN (SELECT id FROM people_log ORDER BY ts DESC, id DESC LIMIT ?);", [TRIM_TO])
+		return
 	_entries.append(e)
 	if _entries.size() > MAX_ENTRIES:
 		_entries = _entries.slice(_entries.size() - TRIM_TO)
@@ -75,6 +88,9 @@ func record(uid: String, name: String, text: String, by: String = "user") -> voi
 
 ## 這個人講過幾句(用來判斷是不是新面孔)
 func count_for(uid: String) -> int:
+	if _db != null:
+		var r: Array = _db.q("SELECT COUNT(*) AS n FROM people_log WHERE uid=?;", [uid])
+		return int(r[0]["n"]) if r.size() > 0 else 0
 	var n: int = 0
 	for e in _entries:
 		if String(e.get("uid", "")) == uid:
@@ -83,6 +99,9 @@ func count_for(uid: String) -> int:
 
 ## 認識的人清單:[{uid, name, count, last_ts}],最近講過話的排前面
 func known_people() -> Array:
+	if _db != null:
+		return _db.q("""SELECT uid, MAX(name) AS name, COUNT(*) AS count, MAX(ts) AS last_ts
+			FROM people_log GROUP BY uid ORDER BY last_ts DESC;""")
 	var by_uid: Dictionary = {}
 	for e in _entries:
 		var uid: String = String(e.get("uid", ""))
@@ -112,6 +131,9 @@ func _matches_person(e: Dictionary, who: String) -> bool:
 func recall(who: String, keyword: String = "", limit: int = 12) -> String:
 	var kw: String = keyword.strip_edges().to_lower()
 	var hits: Array = []
+	if _db != null:
+		hits = _db_recall(who.strip_edges(), kw, limit)
+		return _format(hits, who, keyword)
 	for i in range(_entries.size() - 1, -1, -1):     ## 由新到舊
 		var e: Dictionary = _entries[i]
 		if not _matches_person(e, who):
@@ -128,6 +150,32 @@ func recall(who: String, keyword: String = "", limit: int = 12) -> String:
 			return "(沒有 %s 的紀錄,可能是第一次遇到)" % who
 		return "(沒查到相關紀錄)"
 	hits.reverse()                                    ## 輸出時改回時間順序
+	return _format(hits, who, keyword)
+
+## DB 版查詢:名字用 LIKE 模糊比對(STT 常把人名聽歪),uid 精確比對
+func _db_recall(who: String, kw: String, limit: int) -> Array:
+	var sql: String = "SELECT * FROM people_log WHERE 1=1"
+	var args: Array = []
+	if who != "":
+		sql += " AND (uid=? OR LOWER(name) LIKE ?)"
+		args.append(who)
+		args.append("%" + who.to_lower() + "%")
+	if kw != "":
+		sql += " AND LOWER(text) LIKE ?"
+		args.append("%" + kw + "%")
+	sql += " ORDER BY ts DESC, id DESC LIMIT ?;"   ## ts 只到秒,同秒多筆要靠 id 分先後
+	args.append(limit)
+	var rows: Array = _db.q(sql, args)
+	rows.reverse()                                    ## 輸出改回時間順序
+	return rows
+
+func _format(hits: Array, who: String, keyword: String) -> String:
+	if hits.is_empty():
+		if who != "" and keyword != "":
+			return "(沒查到 %s 講過「%s」)" % [who, keyword]
+		if who != "":
+			return "(沒有 %s 的紀錄,可能是第一次遇到)" % who
+		return "(沒查到相關紀錄)"
 	var out: String = ""
 	for e in hits:
 		out += "[%s] %s%s: %s\n" % [
@@ -140,6 +188,10 @@ func recall(who: String, keyword: String = "", limit: int = 12) -> String:
 ## 注入 context 用的簡短版:這個人最近說過什麼
 func recent_brief(uid: String, n: int = 6) -> String:
 	var hits: Array = []
+	if _db != null:
+		hits = _db.q("SELECT * FROM people_log WHERE uid=? AND by!='doro' ORDER BY ts DESC, id DESC LIMIT ?;", [uid, n])
+		hits.reverse()
+		return _brief_text(hits)
 	for i in range(_entries.size() - 1, -1, -1):
 		var e: Dictionary = _entries[i]
 		if String(e.get("uid", "")) != uid:
@@ -152,6 +204,11 @@ func recent_brief(uid: String, n: int = 6) -> String:
 	if hits.is_empty():
 		return ""
 	hits.reverse()
+	return _brief_text(hits)
+
+func _brief_text(hits: Array) -> String:
+	if hits.is_empty():
+		return ""
 	var name: String = String(hits[hits.size() - 1].get("name", "?"))
 	var out: String = "\n\n# 你對「%s」的印象(他之前說過的話)\n" % name
 	for e in hits:
@@ -161,14 +218,19 @@ func recent_brief(uid: String, n: int = 6) -> String:
 ## 清空(設定 → 資料管理)。這裡存的是頻道裡每個人講話的逐字原文,
 ## 使用者要能自己刪掉
 func clear_all() -> void:
+	if _db != null:
+		_db.q("DELETE FROM people_log;")
+		DoroLogger.log("people_log_cleared", {"store": "db"})
+		return
 	_entries.clear()
 	_rewrite_all()
-	DoroLogger.log("people_log_cleared", {})
+	DoroLogger.log("people_log_cleared", {"store": "jsonl"})
 
 ## 檔案被外部刪掉(設定的資料管理頁)後重讀。
 ## 不重讀的話記憶體裡的舊資料會在下次 record 時被寫回檔案,等於沒刪掉
 func reload() -> void:
-	_load()
+	if _db == null:
+		_load()
 
 static func _date_of(ts: int) -> String:
 	if ts <= 0:

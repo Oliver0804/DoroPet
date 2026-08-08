@@ -32,3 +32,6 @@ macos-build/
 # Discord 語音橋
 discord_bridge/node_modules/
 discord_bridge/debug/
+
+# SQLite GDExtension 由 00_install.sh 下載
+addons/godot-sqlite/

@@ -142,6 +142,7 @@ var _hidden: bool = false
 var _chat: Node                            ## ChatClient 實例
 var _discord: Node                         ## DiscordClient(語音橋,預設關)
 var _people: Node                          ## PeopleStore(Discord 各人說過的話)
+var _db: DoroDB = null                     ## 統一資料層(SQLite);null = 退回 jsonl
 var _discord_prev_always_listen: bool = false  ## 進 DC 頻道前的常駐聽狀態,離開時還原
 var _last_discord_uid: String = ""            ## 上一句是誰講的(換人才重組 context)
 var _voice: Node                           ## VoiceClient 實例
@@ -1221,8 +1222,18 @@ func _build_chat_ui() -> void:
 	_voice.call("set_bp_cluster", _config_get("voice", "bp_cluster", ""))
 	_voice.call("set_bp_speaker", _config_get("voice", "bp_speaker", ""))
 	## Discord 語音橋:預設關,從選單開。開了才會去連 sidecar
+	## 統一資料層:開一次,所有記憶模組共用。GDExtension 缺席時 open() 回 false,
+	## 各模組會自動退回原本的 jsonl 模式,不會崩
+	_db = DoroDB.new()
+	if _db.open():
+		var moved: Dictionary = _db.migrate_from_jsonl()
+		DoroLogger.log("db_ready", {"path": DoroDB.DB_PATH, "migrated": moved})
+	else:
+		_db = null
+
 	_people = PeopleStore.new()
 	_people.name = "PeopleStore"
+	_people.call("setup_db", _db)
 	add_child(_people)
 	_chat.call("set_people_store", _people)
 

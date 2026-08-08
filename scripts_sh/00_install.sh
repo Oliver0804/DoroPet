@@ -68,3 +68,34 @@ echo "✅ 全部完成。執行: bash scripts_sh/03_run.sh"
 echo ""
 echo "提示: 設定 OpenRouter API key:"
 echo "   echo 'export OPENROUTER_API_KEY=sk-or-v1-xxx' > ~/.doropet.env"
+
+# ---------- godot-sqlite (記憶資料庫) ----------
+# addons/ 不入版控,所以在這裡拉。只留 macOS/Windows 的 binary,
+# 完整包含 iOS/Android 有 67MB,用不到
+SQLITE_DIR="$ROOT/addons/godot-sqlite"
+if [[ -f "$SQLITE_DIR/gdsqlite.gdextension" ]]; then
+  echo "✅ godot-sqlite 已存在,略過"
+else
+  echo "📥 下載 godot-sqlite…"
+  SQLITE_URL=$(curl -s https://api.github.com/repos/2shady4u/godot-sqlite/releases/latest \
+    | grep -o 'https://[^"]*addons\.zip' | head -1)
+  if [[ -z "$SQLITE_URL" ]]; then
+    echo "⚠️  抓不到下載網址,記憶功能會退回 jsonl 模式(仍可正常使用)" >&2
+  else
+    TMP_ZIP=$(mktemp -t godot-sqlite).zip
+    curl -sL -o "$TMP_ZIP" "$SQLITE_URL"
+    mkdir -p "$ROOT/addons"
+    unzip -q -o "$TMP_ZIP" \
+      "addons/godot-sqlite/bin/*macos*" \
+      "addons/godot-sqlite/bin/*windows*" \
+      "addons/godot-sqlite/*.gdextension" \
+      "addons/godot-sqlite/LICENSE*" \
+      -d "$ROOT" 2>/dev/null || true
+    rm -f "$TMP_ZIP"
+    if [[ -f "$SQLITE_DIR/gdsqlite.gdextension" ]]; then
+      echo "✅ godot-sqlite 裝好了 ($(du -sh "$SQLITE_DIR" | cut -f1))"
+    else
+      echo "⚠️  解壓失敗,記憶功能會退回 jsonl 模式(仍可正常使用)" >&2
+    fi
+  fi
+fi
