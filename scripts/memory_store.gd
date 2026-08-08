@@ -459,11 +459,33 @@ func _llm_ops(api_key: String, model: String, system_prompt: String, user_msg: S
 		text = text.trim_prefix("```json").trim_prefix("```").trim_suffix("```").strip_edges()
 	## 剝掉 array 外的前後綴
 	var s: int = text.find("[")
-	var e: int = text.rfind("]")
-	if s < 0 or e <= s:
-		DoroLogger.log("memory_distill_error", {"reason": "no ops array", "raw": text.substr(0, 100)})
+	if s < 0:
+		DoroLogger.log("memory_distill_error", {
+			"reason": "no ops array", "raw": text.substr(0, 300)})
 		return false
-	var ops: Variant = JSON.parse_string(text.substr(s, e - s + 1))
+	var e: int = text.rfind("]")
+	var arr_text: String = ""
+	if e > s:
+		arr_text = text.substr(s, e - s + 1)
+	else:
+		## 回應被截斷(沒有結尾的 ])。實測 44% 的蒸餾都栽在這裡,
+		## 整批 ops 被丟掉 —— 而它們多半是要清理過期事實的 delete,
+		## 一直失敗的話帳本就只增不減。
+		## 救法:取到最後一個完整的物件為止,自己把 ] 補回去,能套多少算多少
+		var last: int = text.rfind("}")
+		if last <= s:
+			DoroLogger.log("memory_distill_error", {
+				"reason": "truncated, nothing usable", "raw": text.substr(0, 300)})
+			return false
+		arr_text = text.substr(s, last - s + 1) + "]"
+		DoroLogger.log("memory_distill_truncated", {
+			"recovered_chars": arr_text.length(), "total_chars": text.length()})
+	var ops: Variant = JSON.parse_string(arr_text)
+	if typeof(ops) != TYPE_ARRAY and e <= s:
+		## 補 ] 之後還是壞的 → 可能斷在物件中間,退一格再試一次
+		var prev: int = arr_text.rfind("},")
+		if prev > 0:
+			ops = JSON.parse_string(arr_text.substr(0, prev + 1) + "]")
 	if typeof(ops) != TYPE_ARRAY:
 		DoroLogger.log("memory_distill_error", {"reason": "ops parse fail"})
 		return false
