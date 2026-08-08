@@ -233,7 +233,8 @@ func _setup_reassert_top() -> void:
 		"flag_transparent": DisplayServer.window_get_flag(DisplayServer.WINDOW_FLAG_TRANSPARENT, wid),
 	})
 	_reassert_top_timer = Timer.new()
-	_reassert_top_timer.wait_time = 1.0        ## 從 3s 縮短:切 app 後最多 1 秒 Doro 回最上
+	## 只是巡邏旗標有沒有被系統重設,不再每秒硬拉視窗,所以可以放慢
+	_reassert_top_timer.wait_time = 2.0
 	_reassert_top_timer.autostart = true
 	_reassert_top_timer.timeout.connect(_reapply_always_on_top)
 	add_child(_reassert_top_timer)
@@ -269,12 +270,21 @@ func _reapply_always_on_top(force_raise: bool = false) -> void:
 	if not _always_on_top:
 		return
 	var wid: int = get_window().get_window_id()
+	## 旗標還在就什麼都別做。原本每秒無條件 move_to_foreground 維持 z-order,
+	## 但那會把輸入焦點搶走 —— 打字打到一半游標跳掉,沒辦法工作。
+	## (註解說 orderFrontRegardless 不搶焦點,實測會。)
+	## 平常只檢查旗標,掉了才重設;真正要硬拉到最前面只在明確時機做
+	## (啟動、從系統匣恢復、選單「拉回最上層」)。
+	if DisplayServer.window_get_flag(DisplayServer.WINDOW_FLAG_ALWAYS_ON_TOP, wid) \
+			and not force_raise:
+		return
 	get_window().always_on_top = true
 	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_ALWAYS_ON_TOP, true, wid)
-	## Godot 4.6 對主視窗 borderless+transparent 的 always_on_top flag 寫不進去,
-	## 用 move_to_foreground 硬拉 z-order。Godot macOS 底層是 orderFrontRegardless,
-	## raise 視窗但不 activate app、不搶輸入焦點。週期 timer 也跑這個維持位置。
-	DisplayServer.window_move_to_foreground(wid)
+	if force_raise:
+		DisplayServer.window_move_to_foreground(wid)
+		DoroLogger.log("window_raise", {"reason": "force"})
+	else:
+		DoroLogger.log("window_top_reasserted", {})   ## 旗標被系統重設過
 
 ## ---------- 常駐聽(隨時 STT) ----------
 func _apply_always_listening() -> void:
@@ -1997,8 +2007,10 @@ func _show_bubble(text: String, seconds: float) -> void:
 	var min_sz: Vector2 = _bubble.get_combined_minimum_size()
 	_bubble_window.size = Vector2i(int(ceil(min_sz.x)), int(ceil(min_sz.y)))
 	_reposition_bubble()
-	## bubble 秀完把主視窗硬拉到最上(force_raise=true 才 move_to_foreground)
-	_reapply_always_on_top(true)
+	## 這裡不能 force_raise —— Doro 每講一句話都會秀 bubble,每次都硬拉視窗
+	## 等於持續搶走輸入焦點,打字打到一半游標就跳掉。
+	## 氣泡本身是副窗、自己有 always_on_top,不需要動到主視窗的 z-order
+	_reapply_always_on_top()
 
 func _reposition_bubble() -> void:
 	if _bubble_window == null or not _bubble_window.visible:
