@@ -573,7 +573,9 @@ func send(user_text: String, image_b64: String = "", meta: String = "") -> void:
 	## 只留人設、時間、心情,加上場合註記裡那個人自己的印象
 	var memory_ctx: String = ""
 	if _audience == AUDIENCE_OWNER:
-		memory_ctx = summary_ctx + String(_mem.call("memory_section"))
+		## 側寫放在事實帳本前面:先知道「他現在怎麼了」,再看「他是誰」
+		memory_ctx = String(_mem.call("user_state_section")) \
+			+ summary_ctx + String(_mem.call("memory_section"))
 	else:
 		memory_ctx = GUEST_MEMORY_NOTE
 	var full_system: String = _persona.strip_edges() + _context_note + time_ctx + mood_ctx \
@@ -620,6 +622,14 @@ func send(user_text: String, image_b64: String = "", meta: String = "") -> void:
 	_send_round()
 	## 背景觸發歷史摘要(不 await,LLM 回完後結果會影響「下一輪」的 history)
 	call_deferred("_bg_summarize_history_if_needed")
+	call_deferred("_bg_analyze_user_state")
+
+## 背景推測主人現在的狀態與需求。跟摘要一樣不擋對話,結果影響下一輪
+func _bg_analyze_user_state() -> void:
+	if _mem == null or _api_key == "" or _audience != AUDIENCE_OWNER:
+		return
+	await _mem.call("maybe_analyze_user_state", _history, _api_key,
+		_distill_model if _distill_model != "" else _model)
 
 func _bg_summarize_history_if_needed() -> void:
 	if _mem == null or _api_key == "" or _audience != AUDIENCE_OWNER:

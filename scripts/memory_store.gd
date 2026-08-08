@@ -59,6 +59,8 @@ func _ready() -> void:
 
 ## 載入所有記憶。setup_db() 之後由 pet.gd 呼叫,或沒有 DB 時 _ready 自己跑
 func load_all() -> void:
+	if _db != null:
+		_user_state = _db.kv_get("user_state", "")
 	_load_facts()
 	_load_followups()
 	_load_meta()
@@ -683,6 +685,75 @@ func _extract_del_ids(raw: String) -> Array:
 	if rb < 0 and out.size() > 0:
 		out.remove_at(out.size() - 1)
 	return out
+
+## ---------- 主人狀態側寫 ----------
+## 跟事實帳本的分工:那邊記「發生過什麼」(客觀、長期),這邊推「他現在怎麼了」
+## (主觀、會過期)。事實帳本知道「主人在寫韌體」,側寫知道「他卡關兩天了,
+## 現在需要的是有人聽他罵,不是建議」—— 後者才決定該怎麼回應。
+const USER_STATE_PROMPT: String = """你在觀察一個人最近的對話,推測他現在的狀態與需求。
+你要輸出的不是他說過什麼(那已經記在別的地方了),而是你從字裡行間看出來的:
+
+- 精神/情緒的走向:累、煩、亢奮、低落、平穩…有沒有在變化
+- 他其實想要的互動:想被陪、想安靜、想被肯定、想找人吐槽、想要有人推他一把
+- 反覆提起但沒解決的事,或明顯在迴避的話題
+- 作息或狀態的異常(熬夜、突然安靜很久、講話變短)
+
+輸出 2-4 句繁體中文,像朋友在心裡的判斷,不要條列不要標題。
+證據不足就直說看不太出來 —— 不要硬掰,錯誤的側寫比沒有側寫更糟。"""
+
+const USER_STATE_EVERY: int = 20        ## 每 20 條訊息(10 輪)重新看一次
+var _user_state: String = ""
+var _since_state: int = 0
+var _state_busy: bool = false
+
+func get_user_state() -> String:
+	return _user_state
+
+## 注入 prompt 用。刻意提醒別直接念出來 —— 這是 Doro 的判斷不是台詞
+func user_state_section() -> String:
+	if _user_state.strip_edges() == "":
+		return ""
+	return "\n\n# 你對主人現在的觀察(你自己的判斷)\n" + _user_state.strip_edges() \
+		+ "\n別直接把這段念出來,用它決定你要用什麼態度回應、該不該追問、該不該收斂。\n"
+
+## 背景分析,不擋對話。由 chat_client 在每輪送出後 call_deferred 觸發
+func maybe_analyze_user_state(history: Array, api_key: String, model: String) -> void:
+	if _state_busy or api_key == "" or history.size() < 6:
+		return
+	_since_state += 1
+	if _since_state < USER_STATE_EVERY:
+		return
+	_since_state = 0
+	_state_busy = true
+	var convo: String = ""
+	var start: int = maxi(0, history.size() - 30)
+	for i in range(start, history.size()):
+		var m: Dictionary = history[i]
+		var role: String = String(m.get("role", ""))
+		if role == "user" and String(m.get("meta", "")) == "proactive":
+			continue          ## 系統注入的提示不是主人講的話
+		var c: String = String(m.get("content", ""))
+		if role == "assistant":
+			## Doro 的回覆是 JSON,只取 text 部分
+			var t: RegEx = RegEx.new()
+			t.compile('"text"\\s*:\\s*"([^"]*)"')
+			var mm: RegExMatch = t.search(c)
+			c = mm.get_string(1) if mm != null else ""
+		if c.strip_edges() == "":
+			continue
+		convo += "%s: %s\n" % ["主人" if role == "user" else "Doro", c.substr(0, 150)]
+	if convo.strip_edges() == "":
+		_state_busy = false
+		return
+	var raw: String = await _llm_raw(api_key, model, USER_STATE_PROMPT, convo, 400)
+	_state_busy = false
+	if raw.strip_edges() == "":
+		return
+	_user_state = raw.strip_edges()
+	if _db != null:
+		_db.kv_set("user_state", _user_state)
+		_db.kv_set("user_state_at", String(Time.get_datetime_string_from_system(false, true)))
+	DoroLogger.log("user_state_updated", {"text": _user_state.substr(0, 120)})
 
 ## ---------- recall:搜尋歸檔 + 對話 log ----------
 func recall(keyword: String) -> String:
