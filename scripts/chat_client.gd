@@ -918,12 +918,27 @@ func _try_emit_sentence() -> void:
 	sentence_stream.emit(sentence, is_first, _stream_emo)
 
 const SENTENCE_BOUNDARIES: PackedStringArray = ["。", "！", "？", "!", "?", ".", "\n"]
+## 只給「第一句」用的較寬邊界:實測從叫它到聽見第一個字要 1.9 秒,
+## 那段空白最難熬。後續句子有前一句在播墊著,不急著切,用一般邊界保語氣完整。
+## 逗號後至少要有 4 個字才切,免得「欸,」這種一兩字的碎片單獨送 TTS
+const FIRST_SENTENCE_BOUNDARIES: PackedStringArray = ["，", ",", "、", "…", "—"]
+const FIRST_MIN_CHARS: int = 4
+
 func _find_sentence_boundary(s: String) -> int:
 	var min_pos: int = -1
 	for b in SENTENCE_BOUNDARIES:
 		var p: int = s.find(b)
 		if p >= 0 and (min_pos < 0 or p < min_pos):
 			min_pos = p
+	if min_pos >= 0:
+		return min_pos
+	## 還沒吐出完整句子,但如果這是第一句,逗號就先切一段出去讓它早點開口
+	if _stream_first_emitted:
+		return -1
+	for b in FIRST_SENTENCE_BOUNDARIES:
+		var p2: int = s.find(b)
+		if p2 >= FIRST_MIN_CHARS and (min_pos < 0 or p2 < min_pos):
+			min_pos = p2
 	return min_pos
 
 ## partial JSON 抽 "text":"..." 之間的字元(容錯 escape)

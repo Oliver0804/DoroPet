@@ -43,8 +43,24 @@ const SILENCE_MS = 800;          // 停頓多久算一句講完
 // 代價是「嗯」「對」這種極短回應會被吃掉 —— 但在熱詞閘門下那種話本來也不會觸發 Doro
 const MIN_SPEECH_SEC = 0.8;
 const MAX_SPEECH_SEC = 30;       // 保險:單句上限,避免有人開麥不放炸記憶體
+// 實測 41% 的收音送到 STT 只換回「沒辨識到內容」—— 呼吸、鍵盤、椅子聲
+// 都能撐過長度門檻。先量一下音量,近乎無聲的根本別送(省錢也省佇列)。
+// 16-bit 音訊滿刻度 32767;正常說話 RMS 通常 >800,環境底噪多在 100 以下
+const MIN_RMS = 350;
 
 function log(...a) { console.log(new Date().toISOString().slice(11, 19), ...a); }
+
+// 整段音訊的均方根音量。用來分辨「真的有人在講話」跟「麥克風開著而已」
+function rmsOf(pcm) {
+	const n = Math.floor(pcm.length / 2);
+	if (n === 0) return 0;
+	let sum = 0;
+	for (let i = 0; i + 1 < pcm.length; i += 2) {
+		const v = pcm.readInt16LE(i);
+		sum += v * v;
+	}
+	return Math.sqrt(sum / n);
+}
 
 // ---------- Discord ----------
 const client = new Client({
@@ -103,6 +119,12 @@ async function captureOne(receiver, userId, guildId) {
 	const pcm48 = Buffer.concat(chunks);
 	const sec = pcm48.length / (48000 * 2 * 2);
 	if (sec < MIN_SPEECH_SEC) return;    // 太短,雜訊
+
+	const rms = rmsOf(pcm48);
+	if (rms < MIN_RMS) {
+		log(`丟棄 ${userId} 的 ${sec.toFixed(1)}s(音量 RMS ${rms.toFixed(0)} < ${MIN_RMS},多半是環境音)`);
+		return;
+	}
 
 	const pcm16 = await resampleTo16kMono(pcm48);
 	const wav = pcmToWav(pcm16);

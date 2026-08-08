@@ -13,6 +13,9 @@ extends Node
 ##   別人的喇叭把牠的聲音收回頻道時會必過閘門 → 自問自答,而且是跨網路的。
 
 signal speech_recognized(text: String, user_name: String, user_id: String)  ## 已過回音+熱詞閘門
+## 聽到了但沒被點名(沒過熱詞閘門)。UI 用來讓主人知道「有在聽,只是沒叫我」——
+## 沒有這個信號的話,一連幾句沒反應看起來就像整個壞掉
+signal heard_but_ignored(text: String, user_name: String)
 signal bridge_connected(up: bool)
 signal login_result(ok: bool, detail: String)
 signal channel_state(in_channel: bool, invoker_name: String)
@@ -355,6 +358,7 @@ func _consider(text: String, user: String, uid: String = "") -> void:
 	var continuing: bool = user == _talker and Time.get_ticks_msec() < _talk_until_ms
 	if not by_hotword and not continuing:
 		DoroLogger.log("discord_no_hotword", {"text": text.substr(0, 60), "user": user})
+		heard_but_ignored.emit(text, user)
 		return
 	_talker = user
 	_extend_talk_window()

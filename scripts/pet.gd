@@ -1237,6 +1237,7 @@ func _build_chat_ui() -> void:
 	_discord.connect("speech_recognized", _on_discord_speech)
 	_discord.connect("channel_state", _on_discord_channel_state)
 	_discord.connect("bridge_connected", _on_discord_bridge)
+	_discord.connect("heard_but_ignored", _on_discord_heard)
 	_voice.connect("tts_wav_ready", _on_tts_wav_for_discord)
 	## 上次關掉時是開著的 → 還原。sidecar 若還在頻道會補發 joined,直接接回去
 	if bool(_config_get("discord", "enabled", false)):
@@ -1906,6 +1907,15 @@ func _leave_discord_mode() -> void:
 		_apply_always_listening()
 	_discord_prev_always_listen = false
 	DoroLogger.log("discord_mode", {"on": false})
+
+## 聽到了但沒被點名。桌面顯示一下就好 —— 不出聲、不進對話、不打斷 Doro,
+## 純粹讓主人知道「收音是通的,只是這句沒叫我」
+func _on_discord_heard(text: String, user_name: String) -> void:
+	if _thinking or (_voice != null and bool(_voice.call("is_speaking"))):
+		return                    ## Doro 正忙,別蓋掉更重要的畫面
+	if _bubble_window != null and _bubble_window.visible:
+		return
+	_show_bubble("👂 %s:%s" % [user_name, text.substr(0, 24)], 1.5)
 
 ## 頻道裡有人叫 Doro(已過回音檢查+熱詞閘門)。
 ## 帶說話者名字進去,不然多人頻道裡 Doro 分不出誰是誰
