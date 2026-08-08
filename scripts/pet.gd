@@ -2131,6 +2131,10 @@ func _on_memory_file_cleared(path: String) -> void:
 		DoroLogger.log("people_log_reloaded", {"reason": "cleared from settings"})
 
 func _on_settings_changed(data: Dictionary) -> void:
+	## 儲值完通常會來設定看一眼,順手解除額度旗標,不用重開 Doro
+	if _chat != null and bool(_chat.call("is_out_of_credits")):
+		_chat.call("reset_credits_flag")
+		DoroLogger.log("credits_flag_reset", {})
 	## 即時套用 + 寫 config
 	var new_model_path: String = String(data.get("model_path", model_path))
 	if new_model_path != "" and new_model_path != model_path:

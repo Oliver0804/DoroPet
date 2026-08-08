@@ -4,6 +4,7 @@ extends Node
 
 signal reply_received(text: String, emotion: int)   ## emotion: 1..14 表情編號，0=不變
 signal error_occurred(reason: String)
+signal credits_exhausted                            ## 402:額度不足,UI 可以提示儲值
 signal tool_started(name: String)                    ## LLM 開始呼叫 tool 時 emit
 signal thinking_resumed                              ## tool 跑完後等 LLM 處理時 emit
 ## 串流輸出:LLM 邊生成邊 emit 一句一句;pet.gd 接住第一句立刻送 TTS
@@ -296,6 +297,16 @@ var _in_flight: bool = false
 var _request_started_ms: int = 0
 var _round: int = 0
 var _empty_retried: bool = false           ## 本輪已為「content 空」重送過一次
+## 額度不足(HTTP 402)。背景任務(側寫/蒸餾/摘要)會停掉,把剩下的額度留給對話 ——
+## 主人正在跟牠講話卻沒錢回應,比記憶少更新一次糟糕得多
+var _out_of_credits: bool = false
+
+func is_out_of_credits() -> bool:
+	return _out_of_credits
+
+## 儲值之後手動解除(設定關閉時呼叫),不用重開 Doro
+func reset_credits_flag() -> void:
+	_out_of_credits = false
 var _pending_image_b64: String = ""              ## LLM call take_screenshot 後待塞的圖
 var _mem: Node                                   ## MemoryStore(歷史落盤 + 主人筆記)
 var _people: Node                                ## PeopleStore(Discord 各人說過的話,可查)
@@ -637,13 +648,13 @@ func send(user_text: String, image_b64: String = "", meta: String = "") -> void:
 
 ## 背景推測主人現在的狀態與需求。跟摘要一樣不擋對話,結果影響下一輪
 func _bg_analyze_user_state() -> void:
-	if _mem == null or _api_key == "" or _audience != AUDIENCE_OWNER:
+	if _mem == null or _api_key == "" or _audience != AUDIENCE_OWNER or _out_of_credits:
 		return
 	await _mem.call("maybe_analyze_user_state", _history, _api_key,
 		_distill_model if _distill_model != "" else _model)
 
 func _bg_summarize_history_if_needed() -> void:
-	if _mem == null or _api_key == "" or _audience != AUDIENCE_OWNER:
+	if _mem == null or _api_key == "" or _audience != AUDIENCE_OWNER or _out_of_credits:
 		return
 	var distill: String = _distill_model if _distill_model != "" else _model
 	var new_hist: Array = await _mem.call("maybe_summarize_history",
@@ -880,8 +891,8 @@ func _on_stream_poll() -> void:
 						var c: PackedByteArray = _stream_client.read_response_body_chunk()
 						if c.size() > 0:
 							err_buf.append_array(c)
-					_stream_fail("HTTP %d: %s" % [code,
-						err_buf.get_string_from_utf8().substr(0, 200)])
+					_stream_fail(_friendly_http_error(code,
+						err_buf.get_string_from_utf8()))
 					return
 			elif st == HTTPClient.STATUS_DISCONNECTED or st == HTTPClient.STATUS_CONNECTION_ERROR:
 				_stream_fail("disconnect during request st=%d" % st)
@@ -1110,6 +1121,22 @@ static func _dict_str(d: Dictionary, key: String, fallback: String = "") -> Stri
 	var v: Variant = d.get(key)
 	return v if v is String else fallback
 
+## HTTP 錯誤轉成主人看得懂的話。原始英文 JSON 丟到氣泡上沒人看得懂,
+## 而 402(沒錢了)是唯一需要主人動手處理的,要講清楚
+func _friendly_http_error(code: int, body: String) -> String:
+	if code == 402:
+		_out_of_credits = true
+		credits_exhausted.emit()
+		DoroLogger.log("credits_exhausted", {"body": body.substr(0, 160)})
+		return "(Doro 說不出話了…OpenRouter 額度用完,要去 openrouter.ai 儲值)"
+	if code == 401 or code == 403:
+		return "(API key 好像不對?去設定檢查一下)"
+	if code == 429:
+		return "(講太快了,被限流了,等一下再說)"
+	if code >= 500:
+		return "(對面伺服器出問題了,等等再試)"
+	return "HTTP %d: %s" % [code, body.substr(0, 120)]
+
 ## 回覆內容是不是 API 原始 JSON 漏出來(最後一道防線,不管哪條路徑漏的都攔)
 const JUNK_MARKERS: PackedStringArray = [
 	'"object":"chat.completion"', '"reasoning_details"',
@@ -1246,8 +1273,9 @@ func _stream_finish_success() -> void:
 		"model": _model, "latency_ms": latency_ms, "stream": true,
 		"sentences_emitted": _stream_emitted_len})
 	_clear_flight()
-	if _mem != null and _audience == AUDIENCE_OWNER:
+	if _mem != null and _audience == AUDIENCE_OWNER and not _out_of_credits:
 		## 訪客的對話不落盤、不蒸餾 —— 那是別人的閒聊,不該變成主人的長期記憶
+		## 沒額度時也跳過:剩下的錢要留給對話本身
 		_mem.call("on_exchange", _history, _api_key,
 			_distill_model if _distill_model != "" else _model)
 	reply_received.emit(full_text, clamp(_stream_emo, 0, 14))
@@ -1265,7 +1293,7 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 		_clear_flight()
 		_active_history().pop_back()
 		DoroLogger.log("chat_error", {"reason": "HTTP %d" % code, "body": text.substr(0, 500), "latency_ms": latency_ms})
-		error_occurred.emit("HTTP %d: %s" % [code, text.substr(0, 200)])
+		error_occurred.emit(_friendly_http_error(code, text))
 		return
 	var parsed: Variant = JSON.parse_string(text)
 	if typeof(parsed) != TYPE_DICTIONARY:
