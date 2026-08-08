@@ -52,13 +52,76 @@ func _ready() -> void:
 	_summary_http = HTTPRequest.new()
 	_summary_http.timeout = 60.0
 	add_child(_summary_http)
+	## 不在這裡載入 —— setup_db() 要先跑,才知道該從 DB 還是 jsonl 讀。
+	## pet.gd 注入 db 之後會呼叫 load_all()
+	if _db == null:
+		load_all()
+
+## 載入所有記憶。setup_db() 之後由 pet.gd 呼叫,或沒有 DB 時 _ready 自己跑
+func load_all() -> void:
 	_load_facts()
 	_load_followups()
 	_load_meta()
 	_history_summary = _load_text(SUMMARY_PATH)
 
 ## ---------- 對外:短期歷史(與 v1 相同) ----------
+## ---------- SQLite ----------
+## 只換底層讀寫,_facts / _followups 這些記憶體結構與所有查詢、渲染、蒸餾邏輯不動
+var _db: DoroDB = null
+
+func setup_db(db: DoroDB) -> void:
+	_db = db if (db != null and db.is_open()) else null
+	if _db == null:
+		return
+	## DB 裡那份是「當初遷移的快照」,之後新增的記憶只進了 jsonl。
+	## 切換過來的第一次要以 jsonl 為準重建一次,不然會回到舊狀態掉記憶。
+	if _db.kv_get("facts_source", "") == "db":
+		return
+	var rows: Array = []
+	for line in _load_text(FACTS_PATH).split("\n"):
+		if line.strip_edges() == "":
+			continue
+		var d: Variant = JSON.parse_string(line)
+		if typeof(d) == TYPE_DICTIONARY:
+			rows.append(d)
+	if rows.size() > 0:
+		_db.q("DELETE FROM facts;")
+		for r in rows:
+			_db.insert("facts", {
+				"id": int(r.get("id", 0)), "type": String(r.get("type", "other")),
+				"text": String(r.get("text", "")), "created": String(r.get("created", "")),
+				"updated": String(r.get("updated", ""))})
+	var fups: Array = []
+	for line2 in _load_text(FOLLOWUPS_PATH).split("\n"):
+		if line2.strip_edges() == "":
+			continue
+		var d2: Variant = JSON.parse_string(line2)
+		if typeof(d2) == TYPE_DICTIONARY:
+			fups.append(d2)
+	_db.q("DELETE FROM followups;")
+	for r2 in fups:
+		_db.insert("followups", {
+			"due": String(r2.get("due", "")), "text": String(r2.get("text", "")),
+			"created": String(r2.get("created", "")),
+			"done": 1 if bool(r2.get("consumed", false)) else 0})
+	_db.kv_set("facts_source", "db")
+	DoroLogger.log("memory_db_switch", {"facts": rows.size(), "followups": fups.size()})
+
 func load_history() -> Array:
+	if _db != null:
+		var rows: Array = _db.q("SELECT role, content, ts, meta FROM history ORDER BY id ASC;")
+		var out: Array = []
+		for r in rows:
+			var m: Dictionary = {"role": String(r["role"]), "content": String(r["content"])}
+			if int(r.get("ts", 0)) > 0:
+				m["ts"] = int(r["ts"])
+			if String(r.get("meta", "")) != "":
+				m["meta"] = String(r["meta"])
+			out.append(m)
+		return out
+	return _load_history_jsonl()
+
+func _load_history_jsonl() -> Array:
 	var raw: String = _load_text(HISTORY_PATH)
 	if raw == "":
 		return []
@@ -66,6 +129,18 @@ func load_history() -> Array:
 	return parsed if typeof(parsed) == TYPE_ARRAY else []
 
 func save_history(history: Array) -> void:
+	if _db != null:
+		## history 每輪都整批換掉(會被裁剪、摘要),整表重寫最單純;量小(<40 筆)
+		_db.q("DELETE FROM history;")
+		for m in history:
+			if typeof(m) != TYPE_DICTIONARY:
+				continue
+			_db.insert("history", {
+				"role": String((m as Dictionary).get("role", "")),
+				"content": String((m as Dictionary).get("content", "")),
+				"ts": int((m as Dictionary).get("ts", 0)),
+				"meta": String((m as Dictionary).get("meta", ""))})
+		return
 	_save_text(HISTORY_PATH, JSON.stringify(history))
 
 func clear_history() -> void:
@@ -556,6 +631,13 @@ func recall(keyword: String) -> String:
 ## ---------- 檔案 IO ----------
 func _load_facts() -> void:
 	_facts.clear()
+	if _db != null:
+		for r in _db.q("SELECT id, type, text, created, updated FROM facts ORDER BY id ASC;"):
+			_facts.append({"id": int(r["id"]), "type": String(r.get("type", "other")),
+				"text": String(r["text"]), "created": String(r.get("created", "")),
+				"updated": String(r.get("updated", ""))})
+			_next_id = maxi(_next_id, int(r["id"]) + 1)
+		return
 	for line in _load_text(FACTS_PATH).split("\n"):
 		if line.strip_edges() == "":
 			continue
@@ -565,6 +647,20 @@ func _load_facts() -> void:
 			_next_id = maxi(_next_id, int((d as Dictionary).get("id", 0)) + 1)
 
 func _save_all() -> void:
+	if _db != null:
+		## 蒸餾是 add/update/delete 的組合,整表換掉最單純也最不會漏
+		## (1000 筆的 DELETE+INSERT 在 SQLite 是毫秒級)
+		_db.q("DELETE FROM facts;")
+		for f in _facts:
+			_db.insert("facts", {
+				"id": int(f.get("id", 0)), "type": String(f.get("type", "other")),
+				"text": String(f.get("text", "")), "created": String(f.get("created", "")),
+				"updated": String(f.get("updated", ""))})
+		_save_followups()
+		_db.kv_set("meta", JSON.stringify({
+			"next_id": _next_id, "next_followup_id": _next_followup_id,
+			"last_consolidate": _last_consolidate}))
+		return
 	var out: String = ""
 	for f in _facts:
 		out += JSON.stringify(f) + "\n"
@@ -577,6 +673,13 @@ func _save_all() -> void:
 ## ---------- Followups(前瞻記憶) ----------
 func _load_followups() -> void:
 	_followups.clear()
+	if _db != null:
+		for r in _db.q("SELECT id, due, text, created, done FROM followups ORDER BY id ASC;"):
+			_followups.append({"id": int(r["id"]), "due": String(r.get("due", "")),
+				"text": String(r["text"]), "created": String(r.get("created", "")),
+				"consumed": int(r.get("done", 0)) != 0})
+			_next_followup_id = maxi(_next_followup_id, int(r["id"]) + 1)
+		return
 	for line in _load_text(FOLLOWUPS_PATH).split("\n"):
 		if line.strip_edges() == "":
 			continue
@@ -586,6 +689,14 @@ func _load_followups() -> void:
 			_next_followup_id = maxi(_next_followup_id, int((d as Dictionary).get("id", 0)) + 1)
 
 func _save_followups() -> void:
+	if _db != null:
+		_db.q("DELETE FROM followups;")
+		for f in _followups:
+			_db.insert("followups", {
+				"due": String(f.get("due", "")), "text": String(f.get("text", "")),
+				"created": String(f.get("created", "")),
+				"done": 1 if bool(f.get("consumed", false)) else 0})
+		return
 	var out: String = ""
 	for f in _followups:
 		out += JSON.stringify(f) + "\n"

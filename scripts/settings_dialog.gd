@@ -1281,6 +1281,10 @@ func _build_memory_viewer() -> void:
 		page.name = String(spec.get("title", "?"))
 		var hint: Label = Label.new()
 		hint.text = String(spec.get("hint", ""))
+		## 記憶已經搬進 SQLite,這些 jsonl 是切換當下的快照、不會再更新。
+		## 不講清楚的話會以為 Doro 沒在記東西
+		if _db != null and _db.is_open():
+			hint.text += "\n⚠️ 記憶已改存資料庫,這個檔案是切換前的舊快照(不再更新)。要看目前的記憶請用「🔍 搜尋」分頁。"
 		hint.add_theme_color_override("font_color", Color(0.55, 0.55, 0.55))
 		hint.add_theme_font_size_override("font_size", 12)
 		page.add_child(hint)

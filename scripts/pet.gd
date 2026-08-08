@@ -1245,6 +1245,9 @@ func _build_chat_ui() -> void:
 	else:
 		_db = null
 
+	if _db != null and _chat != null:
+		_chat.call("set_db", _db)      ## 記憶(facts/history/followups)改從 DB 讀寫
+
 	_people = PeopleStore.new()
 	_people.name = "PeopleStore"
 	_people.call("setup_db", _db)

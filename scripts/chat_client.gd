@@ -322,6 +322,16 @@ func get_persona() -> String:
 	return _persona
 
 ## 設定場合註記(空字串 = 回到預設的「主人桌面」情境)
+## DB 由 pet.gd 開好後注入。chat_client 比 DB 早初始化(_ready 就建了 MemoryStore
+## 並讀了 history),所以這裡要讓記憶重新從 DB 載入一次
+func set_db(db: DoroDB) -> void:
+	if _mem == null:
+		return
+	_mem.call("setup_db", db)
+	_mem.call("load_all")
+	_history = _mem.call("load_history")
+	DoroLogger.log("chat_db_attached", {"history": _history.size()})
+
 ## Discord 模式下由 pet.gd 掛上,讓 recall_person 這個工具有東西可查
 func set_people_store(p: Node) -> void:
 	_people = p
