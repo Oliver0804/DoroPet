@@ -61,6 +61,7 @@ func _ready() -> void:
 func load_all() -> void:
 	if _db != null:
 		_user_state = _db.kv_get("user_state", "")
+		_state_at = int(_db.kv_get("user_state_at", "0"))
 	_load_facts()
 	_load_followups()
 	_load_meta()
@@ -701,8 +702,12 @@ const USER_STATE_PROMPT: String = """你在觀察一個人最近的對話,推測
 輸出 2-4 句繁體中文,像朋友在心裡的判斷,不要條列不要標題。
 證據不足就直說看不太出來 —— 不要硬掰,錯誤的側寫比沒有側寫更糟。"""
 
-const USER_STATE_EVERY: int = 20        ## 每 20 條訊息(10 輪)重新看一次
+## 觸發條件用「距離上次多久」而不是「這次開機後聊了幾輪」——
+## 後者每次重啟就歸零,實測跑了 23 輪卻一次都沒觸發過(最長一段只有 11 輪就重啟了)
+const USER_STATE_MIN_SEC: int = 900     ## 至少隔 15 分鐘才重新看一次
+const USER_STATE_MIN_MSGS: int = 8      ## 且這段期間至少要有 8 條新訊息
 var _user_state: String = ""
+var _state_at: int = 0                  ## 上次側寫的時間(Unix 秒,存 DB 跨重啟)
 var _since_state: int = 0
 var _state_busy: bool = false
 
@@ -721,7 +726,10 @@ func maybe_analyze_user_state(history: Array, api_key: String, model: String) ->
 	if _state_busy or api_key == "" or history.size() < 6:
 		return
 	_since_state += 1
-	if _since_state < USER_STATE_EVERY:
+	var now: int = int(Time.get_unix_time_from_system())
+	if _since_state < USER_STATE_MIN_MSGS:
+		return
+	if _state_at > 0 and now - _state_at < USER_STATE_MIN_SEC:
 		return
 	_since_state = 0
 	_state_busy = true
@@ -750,9 +758,10 @@ func maybe_analyze_user_state(history: Array, api_key: String, model: String) ->
 	if raw.strip_edges() == "":
 		return
 	_user_state = raw.strip_edges()
+	_state_at = int(Time.get_unix_time_from_system())
 	if _db != null:
 		_db.kv_set("user_state", _user_state)
-		_db.kv_set("user_state_at", String(Time.get_datetime_string_from_system(false, true)))
+		_db.kv_set("user_state_at", str(_state_at))
 	DoroLogger.log("user_state_updated", {"text": _user_state.substr(0, 120)})
 
 ## ---------- recall:搜尋歸檔 + 對話 log ----------
