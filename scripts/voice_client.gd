@@ -69,6 +69,9 @@ const ECHO_WINDOW_SEC: int = 15          ## TTS 講完 15 秒內收到的相似�
 var _speak_start_ms: int = 0             ## Time.get_ticks_msec() 這句 speak 開始的時間
 var _speak_full_text_len: int = 0        ## 這句 speak 全文長度(中文字元計)
 const SPEAK_CHARS_PER_SEC: float = 5.0   ## 平均語速估算(中文 TTS)
+## Doro 至少要講到這麼多字,才承認「主人在插話」。約 1.2 秒,
+## 短於此的多半是自己的回音被 STT 誤聽成別的句子(字面對不上,躲過回音比對)
+const BARGE_MIN_SPOKEN_CHARS: int = 6
 
 ## 思考填充語:LLM 慢時 Doro 先「嗯~讓我想想」;首次用 TTS 真生成並存 cache,
 ## 之後直接播 wav 零 API 成本
@@ -341,8 +344,15 @@ func _on_stream_utterance(text: String) -> void:
 			DoroLogger.log("barge_ignored", {"text": stripped,
 				"reason": "backchannel" if is_backchannel else "short_noise"})
 			return
-		## 不是回音又在講話 → 主人真的插話
+		## 不是回音又在講話 → 主人真的插話。
+		## 但 Doro 才剛開口就「被打斷」多半不是真的:實測到牠講兩個字(「蛤？」)
+		## 就被自己的回音打斷,然後回一句、又被打斷,陷入自問自答的循環。
+		## 真人不會在對方吐出兩個字時插話,而回音必然發生在播放期間 —— 用這個分開
 		var spoken_chars: int = get_spoken_chars_estimate()
+		if spoken_chars < BARGE_MIN_SPOKEN_CHARS:
+			DoroLogger.log("barge_ignored", {"text": stripped,
+				"reason": "too_early", "spoken_chars": spoken_chars})
+			return
 		DoroLogger.log("barge_in_utter", {"text": text.substr(0, 60),
 			"spoken_chars": spoken_chars})
 		barge_in_detected.emit(spoken_chars)   ## 讓 pet.gd truncate history
