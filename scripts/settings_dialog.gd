@@ -1162,13 +1162,13 @@ func _on_close() -> void:
 
 ## ---------- 記憶檢視器 ----------
 const MEMORY_FILES: Array = [
-	{"title": "🧠 事實帳本", "path": "user://doro_facts.jsonl",
-	 "hint": "Doro 從對話蒸餾出來的長期記憶,每行一條 JSON"},
-	{"title": "💬 短期歷史", "path": "user://doro_history.json",
+	{"title": "🧠 事實帳本", "path": "user://doro_facts.jsonl", "table": "facts",
+	 "hint": "Doro 從對話蒸餾出來的長期記憶"},
+	{"title": "💬 短期歷史", "path": "user://doro_history.json", "table": "history",
 	 "hint": "最近對話原文,做為上下文回饋"},
-	{"title": "🎧 人物記憶(Discord)", "path": "user://doro_people_log.jsonl",
+	{"title": "🎧 人物記憶(Discord)", "path": "user://doro_people_log.jsonl", "table": "people_log",
 		"hint": "頻道裡每個人講過的話(逐字原文+時間)。清掉後 Doro 不再記得他們說過什麼。"},
-	{"title": "📦 已歸檔事實", "path": "user://doro_archive.jsonl",
+	{"title": "📦 已歸檔事實", "path": "user://doro_archive.jsonl", "table": "facts_archive",
 	 "hint": "已刪除 / 過期的舊事實,可被 recall 翻回來"},
 	{"title": "📄 v1 舊筆記", "path": "user://doro_memory.txt",
 	 "hint": "遷移前的舊格式(僅供對照)"},
@@ -1283,8 +1283,8 @@ func _build_memory_viewer() -> void:
 		hint.text = String(spec.get("hint", ""))
 		## 記憶已經搬進 SQLite,這些 jsonl 是切換當下的快照、不會再更新。
 		## 不講清楚的話會以為 Doro 沒在記東西
-		if _db != null and _db.is_open():
-			hint.text += "\n⚠️ 記憶已改存資料庫,這個檔案是切換前的舊快照(不再更新)。要看目前的記憶請用「🔍 搜尋」分頁。"
+		if _db != null and _db.is_open() and String(spec.get("table", "")) != "":
+			hint.text += "\n(讀自資料庫 · 清空會同時刪掉表與切換前的舊 jsonl)"
 		hint.add_theme_color_override("font_color", Color(0.55, 0.55, 0.55))
 		hint.add_theme_font_size_override("font_size", 12)
 		page.add_child(hint)
@@ -1318,6 +1318,32 @@ func _build_memory_viewer() -> void:
 	btn_row.add_child(close_btn)
 	vb.add_child(btn_row)
 
+## 把一張表倒成人看得懂的文字。欄位各表不同,所以依表名決定怎麼排
+func _dump_table(table: String) -> String:
+	var rows: Array = _db.q("SELECT * FROM %s ORDER BY rowid DESC LIMIT 500;" % table)
+	if rows.is_empty():
+		return "(目前是空的)"
+	var out: String = "共 %d 筆(最多顯示 500,新的在上)\n\n" % rows.size()
+	for r in rows:
+		match table:
+			"facts":
+				out += "#%s [%s] %s\n    (建立 %s / 更新 %s)\n" % [
+					r.get("id", "?"), r.get("type", ""), r.get("text", ""),
+					r.get("created", ""), r.get("updated", "")]
+			"history":
+				out += "%s: %s\n" % ["主人" if String(r.get("role", "")) == "user" else "Doro",
+					r.get("content", "")]
+			"people_log":
+				out += "[%s] %s%s: %s\n" % [
+					DoroDB._ts_date(int(r.get("ts", 0))), r.get("name", "?"),
+					"(Doro)" if String(r.get("by", "")) == "doro" else "", r.get("text", "")]
+			"facts_archive":
+				out += "[%s] %s\n    (原因:%s)\n" % [
+					r.get("archived", ""), r.get("text", ""), r.get("reason", "")]
+			_:
+				out += str(r) + "\n"
+	return out
+
 func _reload_memory_viewer() -> void:
 	if _memory_viewer == null:
 		return
@@ -1325,6 +1351,12 @@ func _reload_memory_viewer() -> void:
 		var spec: Dictionary = MEMORY_FILES[i]
 		var path: String = String(spec["path"])
 		var edit: TextEdit = _mem_edits[i]
+		## 記憶已經搬進 SQLite,直接讀表 —— 讀 jsonl 會看到切換前的舊快照,
+		## 人物記憶那種一開始就存 DB 的甚至根本沒有檔案
+		var table: String = String(spec.get("table", ""))
+		if table != "" and _db != null and _db.is_open():
+			edit.text = _dump_table(table)
+			continue
 		var f: FileAccess = FileAccess.open(path, FileAccess.READ)
 		if f == null:
 			edit.text = "(檔案不存在:%s)" % path
@@ -1371,11 +1403,15 @@ func _confirm_clear_current_memory() -> void:
 	var path: String = String(spec["path"])
 	var confirm: AcceptDialog = ConfirmationDialog.new()
 	confirm.dialog_text = "確定要清空「%s」?\n\n檔案:%s\n這個動作無法復原。" % [String(spec["title"]), path]
+	var table: String = String(spec.get("table", ""))
 	confirm.confirmed.connect(func():
+		if table != "" and _db != null and _db.is_open():
+			_db.q("DELETE FROM %s;" % table)
 		var abs: String = ProjectSettings.globalize_path(path)
 		if FileAccess.file_exists(path):
-			DirAccess.remove_absolute(abs)
+			DirAccess.remove_absolute(abs)   ## 舊快照也一起清掉
 		memory_file_cleared.emit(path)
+		_refresh_search_stats()
 		_reload_memory_viewer()
 	)
 	add_child(confirm)
