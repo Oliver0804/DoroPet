@@ -148,6 +148,17 @@ const SYSTEM_RULES: String = """
 不知道就先 web_search 再說「不確定」。
 
 【絕對禁止】純文字、解釋、code fence、多個 JSON、emoji 圖示。"""
+## 訪客模式取代「關於主人」那段的說明。不能只是留白 —— 要明講為什麼沒有,
+## 不然 Doro 會自己編一套關於對方的說法
+const GUEST_MEMORY_NOTE: String = """
+
+# 關於現在跟你講話的這個人
+你手上沒有他的長期記憶,只有場合註記裡那幾句他最近說過的話。
+主人的事情(專案、行程、人際、私事)**一律不要對他提**,那是主人的隱私,
+不是你們的共同話題。他問起主人在幹嘛,就說不方便講。
+不確定的事別編,直接說不知道。
+"""
+
 const MAX_HISTORY: int = 24                ## 對話 context 上限（user+assistant 訊息對）
 const TIMEOUT_SEC: float = 30.0
 
@@ -245,6 +256,33 @@ var _persona: String = DEFAULT_PERSONA
 ## 平常是空的(就是主人的桌面);進 Discord 語音頻道時由 pet.gd 填,
 ## 不然 Doro 會把說話者前綴「小芸蟲:」當成主人改自稱
 var _context_note: String = ""
+## ---------- 聽眾身分 ----------
+## 決定「這一輪可以給 Doro 看什麼」。主人的事實帳本、桌面的私聊歷史與摘要
+## 都是主人的隱私 —— 頻道裡的其他人跟 Doro 講話時不該攤在它眼前,
+## 不然它會拿主人的專案、人際、行程去回答陌生人。
+enum {AUDIENCE_OWNER, AUDIENCE_GUEST}
+var _audience: int = AUDIENCE_OWNER
+var _guest_name: String = ""
+## 訪客用的獨立對話串。主人的主線 history 不給訪客看,反過來訪客的閒聊
+## 也不該混進主人的私人對話
+var _guest_history: Array = []
+const GUEST_HISTORY_MAX: int = 16
+## 這一輪在跟誰講話。is_owner=false 會收掉主人的事實帳本與私聊歷史
+func set_audience(is_owner: bool, who: String = "") -> void:
+	var next: int = AUDIENCE_OWNER if is_owner else AUDIENCE_GUEST
+	if next != _audience or (not is_owner and who != _guest_name):
+		DoroLogger.log("audience_switch", {
+			"to": "owner" if is_owner else "guest", "who": who})
+	_audience = next
+	_guest_name = who if not is_owner else ""
+
+func is_guest_mode() -> bool:
+	return _audience == AUDIENCE_GUEST
+
+## 這一輪該用哪條對話串。Array 在 GDScript 是引用,append/pop 都作用在本體
+func _active_history() -> Array:
+	return _guest_history if _audience == AUDIENCE_GUEST else _history
+
 var _in_flight: bool = false
 var _request_started_ms: int = 0
 var _round: int = 0
@@ -426,7 +464,7 @@ func abort() -> void:
 	_stream_timer.stop()
 	_stream_state = STREAM_IDLE
 	if not _history.is_empty() and String((_history.back() as Dictionary).get("role", "")) == "user":
-		_history.pop_back()
+		_active_history().pop_back()
 	if _mood != null:
 		_mood.call("on_user_abort")
 	DoroLogger.log("chat_abort", {})
@@ -515,7 +553,7 @@ func send(user_text: String, image_b64: String = "", meta: String = "") -> void:
 	var entry: Dictionary = {"role": "user", "content": user_text, "ts": now_ts}
 	if meta != "":
 		entry["meta"] = meta
-	_history.append(entry)
+	_active_history().append(entry)
 	if _history.size() > MAX_HISTORY * 2:
 		_history = _history.slice(_history.size() - MAX_HISTORY * 2)
 
@@ -531,12 +569,19 @@ func send(user_text: String, image_b64: String = "", meta: String = "") -> void:
 	var mood_ctx: String = String(_mood.call("prompt_line")) if _mood != null else ""
 	var style_ctx: String = _build_style_context(3)
 	var summary_ctx: String = String(_mem.call("summary_section"))
+	## 訪客不給主人的事實帳本與桌面對話摘要 —— 那些是主人的隱私。
+	## 只留人設、時間、心情,加上場合註記裡那個人自己的印象
+	var memory_ctx: String = ""
+	if _audience == AUDIENCE_OWNER:
+		memory_ctx = summary_ctx + String(_mem.call("memory_section"))
+	else:
+		memory_ctx = GUEST_MEMORY_NOTE
 	var full_system: String = _persona.strip_edges() + _context_note + time_ctx + mood_ctx \
-		+ style_ctx + summary_ctx + String(_mem.call("memory_section")) + "\n" + SYSTEM_RULES
+		+ style_ctx + memory_ctx + "\n" + SYSTEM_RULES
 	var messages: Array = [{"role": "system", "content": full_system}]
 	## 送 API 前 strip 掉自加的 ts/meta(OpenAI 兼容 API 只吃 role/content/tool_*)
 	if image_b64 == "":
-		for m in _history:
+		for m in _active_history():
 			messages.append(_strip_meta(m))
 	else:
 		## 把最後一條 user message 改成 multimodal content（text + image）
@@ -577,7 +622,7 @@ func send(user_text: String, image_b64: String = "", meta: String = "") -> void:
 	call_deferred("_bg_summarize_history_if_needed")
 
 func _bg_summarize_history_if_needed() -> void:
-	if _mem == null or _api_key == "":
+	if _mem == null or _api_key == "" or _audience != AUDIENCE_OWNER:
 		return
 	var distill: String = _distill_model if _distill_model != "" else _model
 	var new_hist: Array = await _mem.call("maybe_summarize_history",
@@ -740,7 +785,7 @@ func _send_round() -> void:
 	var err: int = _http.request(ENDPOINT, headers, HTTPClient.METHOD_POST, JSON.stringify(body))
 	if err != OK:
 		_clear_flight()
-		_history.pop_back()
+		_active_history().pop_back()
 		DoroLogger.log("chat_error", {"reason": "HTTPRequest start fail %d" % err})
 		error_occurred.emit("HTTPRequest 啟動失敗: %d" % err)
 
@@ -777,7 +822,7 @@ func _fallback_to_non_stream(body: Dictionary, headers: PackedStringArray) -> vo
 	if err != OK:
 		_clear_flight()
 		if not _history.is_empty():
-			_history.pop_back()
+			_active_history().pop_back()
 		error_occurred.emit("HTTP fallback fail: %d" % err)
 
 func _on_stream_poll() -> void:
@@ -1061,7 +1106,7 @@ func _stream_fail(reason: String) -> void:
 	else:
 		_clear_flight()
 		if not _history.is_empty():
-			_history.pop_back()
+			_active_history().pop_back()
 		error_occurred.emit("stream: " + reason)
 
 func _stream_finish_success() -> void:
@@ -1146,13 +1191,16 @@ func _stream_finish_success() -> void:
 		_mood.call("apply_emotion", _stream_emo)
 	var reply_json: String = '{"emotion":%d,"text":"%s"}' % [_stream_emo,
 		full_text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")]
-	_history.append({"role": "assistant", "content": reply_json,
+	if _audience == AUDIENCE_GUEST and _guest_history.size() > GUEST_HISTORY_MAX:
+		_guest_history = _guest_history.slice(_guest_history.size() - GUEST_HISTORY_MAX)
+	_active_history().append({"role": "assistant", "content": reply_json,
 		"ts": int(Time.get_unix_time_from_system())})
 	DoroLogger.log("chat_response", {"text": full_text, "emotion": _stream_emo,
 		"model": _model, "latency_ms": latency_ms, "stream": true,
 		"sentences_emitted": _stream_emitted_len})
 	_clear_flight()
-	if _mem != null:
+	if _mem != null and _audience == AUDIENCE_OWNER:
+		## 訪客的對話不落盤、不蒸餾 —— 那是別人的閒聊,不該變成主人的長期記憶
 		_mem.call("on_exchange", _history, _api_key,
 			_distill_model if _distill_model != "" else _model)
 	reply_received.emit(full_text, clamp(_stream_emo, 0, 14))
@@ -1161,27 +1209,27 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 	var latency_ms: int = Time.get_ticks_msec() - _request_started_ms
 	if result != HTTPRequest.RESULT_SUCCESS:
 		_clear_flight()
-		_history.pop_back()
+		_active_history().pop_back()
 		DoroLogger.log("chat_error", {"reason": "network result=%d" % result, "latency_ms": latency_ms})
 		error_occurred.emit("網路錯誤 (result=%d)" % result)
 		return
 	var text: String = body.get_string_from_utf8()
 	if code < 200 or code >= 300:
 		_clear_flight()
-		_history.pop_back()
+		_active_history().pop_back()
 		DoroLogger.log("chat_error", {"reason": "HTTP %d" % code, "body": text.substr(0, 500), "latency_ms": latency_ms})
 		error_occurred.emit("HTTP %d: %s" % [code, text.substr(0, 200)])
 		return
 	var parsed: Variant = JSON.parse_string(text)
 	if typeof(parsed) != TYPE_DICTIONARY:
 		_clear_flight()
-		_history.pop_back()
+		_active_history().pop_back()
 		error_occurred.emit("回覆格式異常")
 		return
 	var data: Dictionary = parsed
 	if not data.has("choices") or (data["choices"] as Array).is_empty():
 		_clear_flight()
-		_history.pop_back()
+		_active_history().pop_back()
 		var msg: String = "無 choices"
 		if data.has("error"):
 			msg = JSON.stringify(data["error"])
@@ -1235,7 +1283,7 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 			return
 		_clear_flight()
 		if not _history.is_empty() and String((_history.back() as Dictionary).get("role", "")) == "user":
-			_history.pop_back()
+			_active_history().pop_back()
 		error_occurred.emit("模型沒吐出回覆(finish_reason=%s),再說一次試試" % fin)
 		return
 	_clear_flight()

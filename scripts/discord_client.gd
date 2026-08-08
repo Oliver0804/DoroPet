@@ -35,6 +35,7 @@ var _token: String = ""       ## bot token,連上 sidecar 後轉交給它登入
 var _enabled: bool = false
 var _in_channel: bool = false
 var _invoker: String = ""     ## 打 /doro join 把 Doro 叫進來的人 = 主人
+var _invoker_id: String = ""  ## 用 id 判斷才可靠 —— 顯示名稱會改、也可能重名
 var _reconnect_at_ms: int = 0
 var _was_open: bool = false
 var _sidecar_pid: int = -1        ## 我們自己啟動的 sidecar(手動啟動的不歸我們管)
@@ -113,6 +114,13 @@ func is_in_channel() -> bool:
 ## 誰把 Doro 叫進頻道的(視為主人)
 func get_invoker() -> String:
 	return _invoker
+
+func get_invoker_id() -> String:
+	return _invoker_id
+
+## 這個人是不是主人。沒有召喚者資訊時保守起見一律當訪客
+func is_owner(uid: String) -> bool:
+	return _invoker_id != "" and uid == _invoker_id
 
 ## 開:開始連 sidecar。關:斷線並清空待辨識佇列
 func set_enabled(on: bool) -> void:
@@ -287,12 +295,14 @@ func _handle_packet(raw: PackedByteArray) -> void:
 		"joined":
 			_in_channel = true
 			_invoker = String(d.get("invoker_name", ""))
+			_invoker_id = String(d.get("invoker_id", ""))
 			channel_state.emit(true, _invoker)
 			DoroLogger.log("discord_joined", {
 				"channel": String(d.get("channel_id", "")), "invoker": _invoker})
 		"left":
 			_in_channel = false
 			_invoker = ""
+			_invoker_id = ""
 			_talker = ""
 			_talk_until_ms = 0
 			_queue.clear()

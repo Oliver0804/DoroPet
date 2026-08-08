@@ -1802,6 +1802,10 @@ func _is_stop_listen_command(text: String) -> bool:
 	return false
 
 func _on_voice_transcribed(text: String) -> void:
+	## 桌面/打字進來的都是主人本人。DC 路徑會在 _on_discord_speech 先設好,
+	## 那邊呼叫這裡時已經是正確身分,不會被這行蓋掉(它只在非 DC 模式生效)
+	if _chat != null and (_discord == null or not bool(_discord.call("is_in_channel"))):
+		_chat.call("set_audience", true)
 	## 語音指令:「閉嘴」「別說話」→ 關 STT + 停 TTS,不送 LLM
 	if _is_stop_listen_command(text):
 		DoroLogger.log("voice_stop_command", {"text": text})
@@ -1948,6 +1952,10 @@ func _on_discord_heard(text: String, user_name: String) -> void:
 ## 頻道裡有人叫 Doro(已過回音檢查+熱詞閘門)。
 ## 帶說話者名字進去,不然多人頻道裡 Doro 分不出誰是誰
 func _on_discord_speech(text: String, user_name: String, user_id: String) -> void:
+	## 先確定「現在在跟誰講話」,再決定 Doro 眼前攤開什麼資訊
+	var is_owner: bool = _discord != null and bool(_discord.call("is_owner", user_id))
+	if _chat != null:
+		_chat.call("set_audience", is_owner, user_name)
 	if _people != null and user_id != "":
 		## 先查資料庫再回話:每一句都重新撈這個人的紀錄注入 context,
 		## 不是只在換人時撈 —— 同一個人連續講話,他上一句也是新的記憶,
