@@ -112,7 +112,16 @@ const SYSTEM_RULES: String = """
 ========== 系統規則(不可違反) ==========
 
 【輸出格式】只輸出**一個** JSON 物件,不要 Markdown / code fence / 前後綴文字 / 多個 JSON。
-{"emotion": <1-14 的整數>, "text": "你要對主人說的話"}
+{"think": "你心裡的想法", "emotion": <1-14 的整數>, "text": "你要對主人說的話"}
+
+【think — 你的內心話,主人聽不到】
+先想再說。think 是你自己在心裡嘀咕的那一句,不是講給主人聽的:
+- 你注意到什麼(他語氣變了、又提同一件事、跟上次講的對不上)
+- 你打算怎麼接、為什麼(要嗆還是收斂、要追問還是放過)
+- 你真正的心情(嘴上說隨便你,心裡其實在意)
+**一到兩句就好**,想太久主人會等 —— 你是邊想邊講話的,不是寫報告。
+你看得到自己上一輪想了什麼,可以接著想下去。
+think 不會被念出來、不會顯示,想什麼都可以誠實。
 
 【回覆長度】
 一般 60-100 字撒嬌聊天;主人問細節/How/Why/教學/需要解釋時可展開到 200 字。
@@ -323,6 +332,7 @@ const STREAM_TIMEOUT_MS: int = 90000     ## 90 秒 stream 都沒完 → 強制 f
 var _dbg_system_prompt: String = ""
 var _dbg_messages: Array = []
 var _dbg_reply_raw: String = ""
+var _last_think: String = ""      ## 最近一次的內心話(不念出來,但進 history)
 var _dbg_reply_text: String = ""
 var _dbg_reply_emotion: int = 0
 var _dbg_latency_ms: int = 0
@@ -514,6 +524,7 @@ func truncate_last_reply(chars: int) -> void:
 func get_debug_snapshot() -> Dictionary:
 	return {
 		"system_prompt": _dbg_system_prompt,
+		"last_think": _last_think,
 		"messages": _dbg_messages,
 		"last_reply_raw": _dbg_reply_raw,
 		"last_reply_text": _dbg_reply_text,
@@ -1066,6 +1077,30 @@ func _try_parse_non_sse_body(raw: String) -> Dictionary:
 		return _parse_reply_content_json(concat)
 	return {}
 
+static func _esc(t: String) -> String:
+	return t.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
+## 從(可能不完整的)JSON 文字裡抽某個字串欄位。串流時 think 已經吐完了
+static func _extract_json_field(content: String, key: String) -> String:
+	var marker: String = '"%s":"' % key
+	var idx: int = content.find(marker)
+	if idx < 0:
+		marker = '"%s": "' % key
+		idx = content.find(marker)
+		if idx < 0:
+			return ""
+	var body: String = content.substr(idx + marker.length())
+	var i: int = 0
+	while i < body.length():
+		var ch: String = body.substr(i, 1)
+		if ch == "\\" and i + 1 < body.length():
+			i += 2
+			continue
+		if ch == '"':
+			return body.substr(0, i).replace('\\"', '"').replace("\\n", "\n")
+		i += 1
+	return body
+
 ## Dict 取字串,JSON null / 缺 key / 非字串一律回 fallback。
 ## 不能寫 String(d.get(k, "")):思考型模型回 "content": null 時,editor build 會噴
 ## 「Invalid call 'String' constructor」直接中斷函式,export(release) build 更糟——
@@ -1193,19 +1228,21 @@ func _stream_finish_success() -> void:
 			_stream_first_emitted = true
 			sentence_stream.emit(tail, is_first, _stream_emo)
 	## 收工:mood + history + reply_received
+	_last_think = _extract_json_field(_stream_content_acc, "think")
 	_dbg_reply_raw = _stream_content_acc
 	_dbg_reply_text = full_text
 	_dbg_reply_emotion = _stream_emo
 	_dbg_latency_ms = latency_ms
 	if _mood != null and _stream_emo > 0:
 		_mood.call("apply_emotion", _stream_emo)
-	var reply_json: String = '{"emotion":%d,"text":"%s"}' % [_stream_emo,
-		full_text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")]
+	var reply_json: String = '{"think":"%s","emotion":%d,"text":"%s"}' % [
+		_esc(_last_think), _stream_emo, _esc(full_text)]
 	if _audience == AUDIENCE_GUEST and _guest_history.size() > GUEST_HISTORY_MAX:
 		_guest_history = _guest_history.slice(_guest_history.size() - GUEST_HISTORY_MAX)
 	_active_history().append({"role": "assistant", "content": reply_json,
 		"ts": int(Time.get_unix_time_from_system())})
 	DoroLogger.log("chat_response", {"text": full_text, "emotion": _stream_emo,
+		"think": _last_think,
 		"model": _model, "latency_ms": latency_ms, "stream": true,
 		"sentences_emitted": _stream_emitted_len})
 	_clear_flight()
@@ -1323,7 +1360,9 @@ func _on_response(result: int, code: int, _h: PackedStringArray, body: PackedByt
 	if typeof(obj) == TYPE_DICTIONARY and (obj as Dictionary).has("text"):
 		var emo: int = int((obj as Dictionary).get("emotion", 0))
 		var txt: String = _dict_str(obj as Dictionary, "text").strip_edges()
-		DoroLogger.log("chat_response", {"text": txt, "emotion": emo, "model": _model, "latency_ms": latency_ms})
+		_last_think = _dict_str(obj as Dictionary, "think").strip_edges()
+		DoroLogger.log("chat_response", {"text": txt, "emotion": emo, "think": _last_think,
+			"model": _model, "latency_ms": latency_ms})
 		_dbg_reply_text = txt
 		_dbg_reply_emotion = emo
 		if _mood != null and emo > 0:
