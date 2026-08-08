@@ -257,14 +257,18 @@ func _macos_force_apply_top_flag() -> void:
 	})
 
 func _reapply_always_on_top(force_raise: bool = false) -> void:
-	if not _always_on_top or _hidden:
+	if _hidden:
+		return
+	## 副窗要跟著主視窗的設定走。原本這裡無條件設 true,而主視窗在
+	## _always_on_top=false 時直接 return —— 結果就是「對話框浮在最上面、
+	## Doro 本體卻被蓋住」,兩個視窗行為不一致
+	if _input_window != null:
+		_input_window.always_on_top = _always_on_top
+	if _bubble_window != null:
+		_bubble_window.always_on_top = _always_on_top
+	if not _always_on_top:
 		return
 	var wid: int = get_window().get_window_id()
-	## 副窗 (subwindow) 的 always_on_top 有效,直接 set
-	if _input_window != null:
-		_input_window.always_on_top = true
-	if _bubble_window != null:
-		_bubble_window.always_on_top = true
 	get_window().always_on_top = true
 	DisplayServer.window_set_flag(DisplayServer.WINDOW_FLAG_ALWAYS_ON_TOP, true, wid)
 	## Godot 4.6 對主視窗 borderless+transparent 的 always_on_top flag 寫不進去,
@@ -1342,7 +1346,7 @@ func _close_input() -> void:
 func _make_floating_window(default_size: Vector2i) -> Window:
 	var w: Window = Window.new()
 	w.borderless = true
-	w.always_on_top = true        ## 副窗獨立置頂,不綁定主視窗
+	w.always_on_top = _always_on_top   ## 跟主視窗同進退,不然會出現「對話框浮著但 Doro 被蓋住」
 	w.transparent = true
 	w.transparent_bg = true
 	w.unresizable = true
