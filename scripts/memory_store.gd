@@ -427,14 +427,16 @@ func _ledger_text() -> String:
 	return out
 
 ## 呼叫 LLM 拿操作陣列並套用;回傳是否成功
-func _llm_ops(api_key: String, model: String, system_prompt: String, user_msg: String) -> bool:
+## 送一次請求拿回原始文字。蒸餾與整理共用,只有 max_tokens 不同
+func _llm_raw(api_key: String, model: String, system_prompt: String,
+		user_msg: String, max_tokens: int) -> String:
 	var body: Dictionary = {
 		"model": model,
 		"messages": [
 			{"role": "system", "content": system_prompt},
 			{"role": "user", "content": user_msg},
 		],
-		"max_tokens": 8000,
+		"max_tokens": max_tokens,
 		"temperature": 0.1,
 	}
 	var headers: PackedStringArray = [
@@ -445,18 +447,36 @@ func _llm_ops(api_key: String, model: String, system_prompt: String, user_msg: S
 	]
 	if _http.request(ENDPOINT, headers, HTTPClient.METHOD_POST, JSON.stringify(body)) != OK:
 		DoroLogger.log("memory_distill_error", {"reason": "request start fail"})
-		return false
+		return ""
 	var result: Array = await _http.request_completed
 	if int(result[0]) != HTTPRequest.RESULT_SUCCESS or int(result[1]) < 200 or int(result[1]) >= 300:
 		DoroLogger.log("memory_distill_error", {"reason": "HTTP %d" % int(result[1])})
-		return false
+		return ""
 	var parsed: Variant = JSON.parse_string((result[3] as PackedByteArray).get_string_from_utf8())
 	if typeof(parsed) != TYPE_DICTIONARY or not (parsed as Dictionary).has("choices"):
 		DoroLogger.log("memory_distill_error", {"reason": "bad json"})
+		return ""
+	var t: String = _choice_content(parsed).strip_edges()
+	if t.begins_with("```"):
+		t = t.trim_prefix("```json").trim_prefix("```").trim_suffix("```").strip_edges()
+	return t
+
+## 把一條事實移進歸檔(不真的刪掉,recall 還查得到)
+func _archive_fact(f: Dictionary, when: String, reason: String) -> void:
+	var rec: Dictionary = f.duplicate(true)
+	rec["archived"] = when
+	rec["reason"] = reason
+	_append_jsonl(ARCHIVE_PATH, rec)
+	if _db != null:
+		_db.insert("facts_archive", {
+			"orig_id": int(f.get("id", 0)), "type": String(f.get("type", "")),
+			"text": String(f.get("text", "")), "created": String(f.get("created", "")),
+			"archived": when, "reason": reason})
+
+func _llm_ops(api_key: String, model: String, system_prompt: String, user_msg: String) -> bool:
+	var text: String = await _llm_raw(api_key, model, system_prompt, user_msg, 8000)
+	if text == "":
 		return false
-	var text: String = _choice_content(parsed).strip_edges()
-	if text.begins_with("```"):
-		text = text.trim_prefix("```json").trim_prefix("```").trim_suffix("```").strip_edges()
 	## 剝掉 array 外的前後綴
 	var s: int = text.find("[")
 	if s < 0:
@@ -580,12 +600,21 @@ func _migrate_legacy(api_key: String, model: String) -> void:
 		distilled.emit(_render_facts())
 
 ## ---------- 每日整理:合併重複、過期事件下沉 ----------
-const CONSOLIDATE_PROMPT: String = """你是記憶整理器。檢查這份事實帳本,輸出修正操作(JSON array):
-- 內容重複/高度相似的多條 → 保留一條(update 使其完整),其餘 delete
-- event 超過 7 天且非長期重要 → delete(reason:"過期")
-- 明顯矛盾 → 保留較新的,delete 舊的
-- 帳本健康就輸出 []
-今天是 {date}。只輸出 JSON array。"""
+## 整理器用精簡格式,不用一般蒸餾那套完整 op 物件。
+## 原因:整理一次要處理整份帳本(上千條),輸出往往是幾十上百筆刪除。
+## 用 {"op":"delete","id":131} 每筆約 30 字元,用 id 清單每筆只要 4 字元 —— 差 7 倍。
+## 實測 44% 的整理都在輸出中途被 max_tokens 截斷,精簡格式是最直接的解法。
+const CONSOLIDATE_PROMPT: String = """你是記憶整理器。檢查這份事實帳本,找出該清掉的條目。
+
+輸出格式(只輸出這個 JSON 物件,不要別的):
+{"del": [id, id, ...], "keep": [id, ...]}
+
+- del:要刪掉的 id —— 內容重複/高度相似的(留最完整的一條,其餘進 del)、
+  event 超過 7 天且非長期重要、明顯矛盾的舊條目
+- keep:重複群組中你決定保留的那一條 id(可省略,只是幫助你思考)
+- 帳本健康就輸出 {"del": []}
+
+今天是 {date}。只輸出 JSON 物件,不要解釋。"""
 
 func _maybe_consolidate(api_key: String, model: String) -> void:
 	var dt: Dictionary = Time.get_datetime_dict_from_system()
@@ -597,13 +626,63 @@ func _maybe_consolidate(api_key: String, model: String) -> void:
 	for f in _facts:
 		ledger += "#%d [%s] (建立 %s) %s\n" % [int(f["id"]), String(f["type"]),
 			String(f.get("created", "")), String(f["text"])]
-	var ok: bool = await _llm_ops(api_key, model,
+	var ok: bool = await _llm_consolidate(api_key, model,
 		CONSOLIDATE_PROMPT.replace("{date}", today), ledger)
 	_busy = false
 	if ok:
 		_last_consolidate = today
 		_save_all()
 		DoroLogger.log("memory_consolidated", {"facts": _facts.size()})
+
+## 整理專用:收 {"del":[id,...]} 這種精簡格式。
+## 跟 _llm_ops 分開是因為容錯策略不同 —— 這裡就算被截斷,
+## 已經吐出來的 id 都是完整可用的,不像 op 物件會斷在一半
+func _llm_consolidate(api_key: String, model: String, system_prompt: String, user_msg: String) -> bool:
+	var raw: String = await _llm_raw(api_key, model, system_prompt, user_msg, 4000)
+	if raw == "":
+		DoroLogger.log("memory_consolidate_error", {"reason": "empty"})
+		return false
+	var ids: Array = _extract_del_ids(raw)
+	if ids.is_empty():
+		DoroLogger.log("memory_consolidated", {"del": 0, "note": "帳本健康或沒抓到 id"})
+		return true          ## 沒東西要刪也算成功,今天就不用再跑
+	var before: int = _facts.size()
+	var today: String = String(Time.get_date_string_from_system())
+	var kept: Array = []
+	var archived: int = 0
+	for f in _facts:
+		if ids.has(int(f.get("id", -1))):
+			_archive_fact(f, today, "整理:重複或過期")
+			archived += 1
+		else:
+			kept.append(f)
+	_facts = kept
+	DoroLogger.log("memory_consolidated", {
+		"del": archived, "before": before, "after": _facts.size()})
+	return true
+
+## 從回應裡撈 del 的 id 清單。用 regex 而不是 JSON.parse —— 被截斷的
+## {"del":[131,132,13 也還是能把前面完整的 id 撈出來用
+func _extract_del_ids(raw: String) -> Array:
+	var out: Array = []
+	var start: int = raw.find("\"del\"")
+	if start < 0:
+		return out
+	var lb: int = raw.find("[", start)
+	if lb < 0:
+		return out
+	var rb: int = raw.find("]", lb)
+	var body: String = raw.substr(lb + 1, (rb - lb - 1) if rb > lb else (raw.length() - lb - 1))
+	var re: RegEx = RegEx.new()
+	re.compile("\\d+")
+	for m in re.search_all(body):
+		var v: int = int(m.get_string())
+		if v > 0 and not out.has(v):
+			out.append(v)
+	## 被截斷時最後一個數字可能只吐一半(131 → 13),保守起見丟掉尾巴那個
+	if rb < 0 and out.size() > 0:
+		out.remove_at(out.size() - 1)
+	return out
 
 ## ---------- recall:搜尋歸檔 + 對話 log ----------
 func recall(keyword: String) -> String:
